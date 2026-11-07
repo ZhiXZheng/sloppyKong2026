@@ -1,3 +1,27 @@
+<<<<<<< HEAD
 .venv/
 __pycache__
 .env
+=======
+# Python virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Environment variables / secrets
+.env
+.env.*
+
+# IDE settings
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+>>>>>>> fd923a58509c49522ad8eaca13976aa591faf440
