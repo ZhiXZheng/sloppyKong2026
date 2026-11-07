@@ -5,16 +5,25 @@ This module defines the wire protocol shared by the simulation, rescue-team
 agents, radio network, courier drone, and dashboard.
 
 Design rules:
-- Messages are immutable facts or proposals; receiving an event does not
+- Messages describe facts or proposals; receiving an event does not
   automatically authorise a world-state change.
 - `observed_at` and `observer_id` belong to the original observation and must
   be preserved when a message is relayed.
-- `created_at` records when the message was created; `relayed_at` records
+- `created_at` records when the message was created; `picked_up_at` records
   transport history. Neither replaces the original observation timestamp.
 - Delivery is at-least-once: consumers should deduplicate using `message_id`
   and make handlers idempotent.
 - Version checks, claim arbitration, action validation, and world mutation
   are application logic, not responsibilities of these data models.
+- For each entity compare (entity_revision, observed_tick, observer_id,
+  observation_id.hex) lexicographically; larger wins. Revisions are assigned
+  by the simulation and copied by observers. Never order by relay time.
+- Resolve claims in (claimed_at_tick, team_id, claim_id.hex) order (smallest
+  wins), after checking authoritative pickup state. Apply resolutions by
+  resolution_version. UUIDs and timestamps must be injected deterministically
+  by the seeded scheduler when reproducible serialized runs are required.
+- Models are mutable data containers, not deep-immutable records. Transports
+  must preserve the original envelope and observation contents when relaying.
 
 Requires Pydantic >= 2.0.
 """
@@ -26,10 +35,10 @@ from enum import Enum
 from typing import Any, Optional
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "2.0"
 
 
 def utc_now() -> datetime:
@@ -43,7 +52,6 @@ class ProtocolModel(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
         validate_assignment=True,
-        use_enum_values=True,
     )
 
 
@@ -63,6 +71,7 @@ class MessageType(str, Enum):
     WORLD_SNAPSHOT = "world.snapshot"
     OBSERVATION = "world.observation"
     BELIEF_UPDATE = "world.belief_update"
+    BELIEF_SNAPSHOT = "world.belief_snapshot"
     CIVILIAN_STATUS_UPDATE = "world.civilian_status_update"
     FLOOD_UPDATE = "world.flood_update"
 
@@ -81,6 +90,9 @@ class MessageType(str, Enum):
     LINK_STATUS = "network.link_status"
     AGENT_STATUS = "agent.status"
     SITUATION_BRIEF = "ai.situation_brief"
+    AI_REQUEST = "ai.rescue_request"
+    AI_RECOMMENDATION = "ai.rescue_recommendation"
+    DRONE_STATUS = "courier.status"
 
 
 class EntityType(str, Enum):
@@ -91,6 +103,7 @@ class EntityType(str, Enum):
 
 
 class CivilianStatus(str, Enum):
+    """DELIVERED and legacy RESCUED both mean safely at shelter; score once."""
     UNKNOWN = "unknown"
     REPORTED = "reported"
     AVAILABLE = "available"
@@ -153,22 +166,46 @@ class CivilianGroup(ProtocolModel):
     position: GridPosition
     size: int = Field(ge=1)
     status: CivilianStatus = CivilianStatus.AVAILABLE
-    last_updated_at: datetime = Field(default_factory=utc_now)
+    picked_up_by_team_id: Optional[str] = Field(default=None, min_length=1)
+    delivered_to_shelter_id: Optional[str] = Field(default=None, min_length=1)
+    last_updated_at: AwareDatetime = Field(default_factory=utc_now)
 
 
 class Shelter(ProtocolModel):
+    """Capacity and occupants count people."""
     shelter_id: str = Field(min_length=1)
     position: GridPosition
     capacity: Optional[int] = Field(default=None, ge=0)
     occupants: int = Field(default=0, ge=0)
 
+    @model_validator(mode="after")
+    def validate_capacity(self) -> "Shelter":
+        if self.capacity is not None and self.occupants > self.capacity:
+            raise ValueError("occupants exceed shelter capacity")
+        return self
+
 
 class RescueTeamState(ProtocolModel):
+    """Capacity and carried_civilians count people, not groups."""
     team_id: str = Field(min_length=1)
     position: GridPosition
     capacity: int = Field(default=1, ge=1)
     carried_civilians: int = Field(default=0, ge=0)
     status: AgentState = AgentState.ONLINE
+    neighbourhood_id: str = Field(min_length=1)
+    carried_group_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_capacity(self) -> "RescueTeamState":
+        if self.carried_civilians > self.capacity:
+            raise ValueError("carried civilians exceed team capacity")
+        if len(set(self.carried_group_ids)) != len(self.carried_group_ids):
+            raise ValueError("carried_group_ids must be unique")
+        if bool(self.carried_group_ids) != bool(self.carried_civilians):
+            raise ValueError("carried civilians and group IDs must both be present or empty")
+        if len(self.carried_group_ids) > self.carried_civilians:
+            raise ValueError("each carried group must contain at least one person")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +225,9 @@ class Observation(ProtocolModel):
     entity: EntityReference
     position: Optional[GridPosition] = None
     observed_status: Optional[str] = None
-    observed_at: datetime
+    observed_at: AwareDatetime
+    observed_tick: int = Field(ge=0)
+    entity_revision: int = Field(ge=0)
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     details: dict[str, Any] = Field(default_factory=dict)
 
@@ -203,8 +242,11 @@ class BeliefUpdate(ProtocolModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     source_observation_ids: list[UUID] = Field(default_factory=list)
     # Timestamp of the newest source observation, not the time of forwarding.
-    source_observed_at: datetime
-    updated_at: datetime = Field(default_factory=utc_now)
+    source_observed_at: AwareDatetime
+    source_observed_tick: int = Field(ge=0)
+    source_entity_revision: int = Field(ge=0)
+    belief_version: int = Field(ge=1)
+    updated_at: AwareDatetime = Field(default_factory=utc_now)
 
 
 # ---------------------------------------------------------------------------
@@ -224,8 +266,9 @@ class TaskClaim(ProtocolModel):
     civilian_group_id: str = Field(min_length=1)
     status: ClaimStatus = ClaimStatus.PROVISIONAL
     claim_version: int = Field(default=1, ge=1)
-    claimed_at: datetime = Field(default_factory=utc_now)
-    expires_at: Optional[datetime] = None
+    claimed_at_tick: int = Field(ge=0)
+    claimed_at: AwareDatetime = Field(default_factory=utc_now)
+    expires_at: Optional[AwareDatetime] = None
     reason: Optional[str] = None
 
     @model_validator(mode="after")
@@ -242,7 +285,21 @@ class TaskClaimResolution(ProtocolModel):
     resolved_status: ClaimStatus
     conflicting_claim_ids: list[UUID] = Field(default_factory=list)
     resolution_reason: str = Field(min_length=1)
-    resolved_at: datetime = Field(default_factory=utc_now)
+    resolved_at: AwareDatetime = Field(default_factory=utc_now)
+    resolved_at_tick: int = Field(ge=0)
+    resolution_version: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def validate_winner(self) -> "TaskClaimResolution":
+        if (self.winning_team_id is None) != (self.winning_claim_id is None):
+            raise ValueError("winning team and claim must be supplied together")
+        if self.winning_team_id == "":
+            raise ValueError("winning_team_id must not be empty")
+        if self.resolved_status == ClaimStatus.CONFIRMED and self.winning_claim_id is None:
+            raise ValueError("confirmed resolution requires a winner")
+        if self.resolved_status in (ClaimStatus.RELEASED, ClaimStatus.REJECTED) and self.winning_claim_id is not None:
+            raise ValueError("released or rejected resolution cannot have a winner")
+        return self
 
 
 class ActionProposal(ProtocolModel):
@@ -256,7 +313,7 @@ class ActionProposal(ProtocolModel):
     based_on_world_tick: int = Field(ge=0)
     based_on_belief_version: int = Field(default=1, ge=1)
     explanation: Optional[str] = None
-    proposed_at: datetime = Field(default_factory=utc_now)
+    proposed_at: AwareDatetime = Field(default_factory=utc_now)
 
     @model_validator(mode="after")
     def validate_action_target(self) -> "ActionProposal":
@@ -287,7 +344,9 @@ class CivilianStatusUpdate(ProtocolModel):
     status: CivilianStatus
     changed_by_team_id: str = Field(min_length=1)
     world_tick: int = Field(ge=0)
-    changed_at: datetime = Field(default_factory=utc_now)
+    entity_revision: int = Field(ge=0)
+    delivered_to_shelter_id: Optional[str] = Field(default=None, min_length=1)
+    changed_at: AwareDatetime = Field(default_factory=utc_now)
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +358,7 @@ class NetworkLinkStatus(ProtocolModel):
     neighbourhood_a: str = Field(min_length=1)
     neighbourhood_b: str = Field(min_length=1)
     state: LinkState
-    changed_at: datetime = Field(default_factory=utc_now)
+    changed_at: AwareDatetime = Field(default_factory=utc_now)
 
 
 class Heartbeat(ProtocolModel):
@@ -307,7 +366,69 @@ class Heartbeat(ProtocolModel):
     role: AgentRole
     state: AgentState
     current_world_tick: int = Field(ge=0)
-    sent_at: datetime = Field(default_factory=utc_now)
+    sent_at: AwareDatetime = Field(default_factory=utc_now)
+
+
+class FloodUpdate(ProtocolModel):
+    """Complete set of flooded cells at this revision, not a delta."""
+
+    world_tick: int = Field(ge=0)
+    revision: int = Field(ge=0)
+    flood_cells: list[GridPosition] = Field(default_factory=list)
+
+
+class AgentStatus(ProtocolModel):
+    agent_id: str = Field(min_length=1)
+    neighbourhood_id: str = Field(min_length=1)
+    state: AgentState
+    world_tick: int = Field(ge=0)
+    radio_connected: bool
+    ai_enabled: bool = True
+    current_target_id: Optional[str] = None
+    decision_context_version: int = Field(ge=1)
+
+    @property
+    def ai_available(self) -> bool:
+        return self.radio_connected and self.ai_enabled and self.state != AgentState.OFFLINE
+
+
+class AreaInformationFreshness(ProtocolModel):
+    """Freshness known locally to the drone; None means never received."""
+
+    neighbourhood_id: str = Field(min_length=1)
+    latest_observed_tick: Optional[int] = Field(default=None, ge=0)
+
+
+class DroneState(ProtocolModel):
+    drone_id: str = Field(min_length=1)
+    position: GridPosition
+    enabled: bool = True
+    destination_neighbourhood: Optional[str] = None
+    carried_packet_ids: list[UUID] = Field(default_factory=list)
+    area_freshness: list[AreaInformationFreshness] = Field(default_factory=list)
+    world_tick: int = Field(ge=0)
+
+
+class TeamBeliefSnapshot(ProtocolModel):
+    """Only locally known information; never populated from global truth."""
+
+    team_id: str = Field(min_length=1)
+    belief_version: int = Field(ge=1)
+    world_tick: int = Field(ge=0)
+    observations: list[Observation] = Field(default_factory=list)
+    claims: list[TaskClaim] = Field(default_factory=list)
+
+
+class AIRescueRequest(ProtocolModel):
+    """Bump context on target, task or connectivity changes; enforce timeout in code."""
+
+    request_id: UUID = Field(default_factory=uuid4)
+    seed: int
+    beliefs: TeamBeliefSnapshot
+    decision_context_version: int = Field(ge=1)
+    current_target_id: Optional[str] = None
+    requested_at: AwareDatetime = Field(default_factory=utc_now)
+    timeout_seconds: float = Field(default=3.0, gt=0, le=3.0)
 
 
 class RelayedMessage(ProtocolModel):
@@ -319,8 +440,14 @@ class RelayedMessage(ProtocolModel):
     """
 
     envelope: "MessageEnvelope"
-    picked_up_at: datetime = Field(default_factory=utc_now)
+    picked_up_at: AwareDatetime = Field(default_factory=utc_now)
     original_sender_id: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_sender(self) -> "RelayedMessage":
+        if self.original_sender_id != self.envelope.sender_id:
+            raise ValueError("original_sender_id must match the original envelope")
+        return self
 
 
 class CourierPacket(ProtocolModel):
@@ -329,8 +456,8 @@ class CourierPacket(ProtocolModel):
     source_neighbourhood: str = Field(min_length=1)
     destination_neighbourhood: str = Field(min_length=1)
     messages: list[RelayedMessage] = Field(default_factory=list)
-    departed_at: datetime = Field(default_factory=utc_now)
-    delivered_at: Optional[datetime] = None
+    departed_at: AwareDatetime = Field(default_factory=utc_now)
+    delivered_at: Optional[AwareDatetime] = None
 
     @model_validator(mode="after")
     def validate_delivery_time(self) -> "CourierPacket":
@@ -345,7 +472,7 @@ class CourierReceipt(ProtocolModel):
     receiving_neighbourhood: str = Field(min_length=1)
     received_message_ids: list[UUID] = Field(default_factory=list)
     duplicate_message_ids: list[UUID] = Field(default_factory=list)
-    received_at: datetime = Field(default_factory=utc_now)
+    received_at: AwareDatetime = Field(default_factory=utc_now)
 
 
 # ---------------------------------------------------------------------------
@@ -356,11 +483,13 @@ class WorldSnapshot(ProtocolModel):
     """A snapshot for initialisation or dashboard display, not shared truth."""
 
     world_tick: int = Field(ge=0)
-    created_at: datetime = Field(default_factory=utc_now)
+    created_at: AwareDatetime = Field(default_factory=utc_now)
     civilian_groups: list[CivilianGroup] = Field(default_factory=list)
     shelters: list[Shelter] = Field(default_factory=list)
     rescue_teams: list[RescueTeamState] = Field(default_factory=list)
     flood_cells: list[GridPosition] = Field(default_factory=list)
+    drone: Optional[DroneState] = None
+    agent_statuses: list[AgentStatus] = Field(default_factory=list)
 
 
 class AIRescueRecommendation(ProtocolModel):
@@ -371,13 +500,15 @@ class AIRescueRecommendation(ProtocolModel):
     """
 
     team_id: str = Field(min_length=1)
+    request_id: UUID
+    decision_context_version: int = Field(ge=1)
     recommended_target_id: Optional[str] = None
     recommended_action: ActionType
     explanation: str = ""
     missing_information: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     based_on_belief_version: int = Field(ge=1)
-    generated_at: datetime = Field(default_factory=utc_now)
+    generated_at: AwareDatetime = Field(default_factory=utc_now)
 
 
 class SituationBrief(ProtocolModel):
@@ -388,7 +519,7 @@ class SituationBrief(ProtocolModel):
     warnings: list[str] = Field(default_factory=list)
     stale_information: list[str] = Field(default_factory=list)
     unknown_information: list[str] = Field(default_factory=list)
-    generated_at: datetime = Field(default_factory=utc_now)
+    generated_at: AwareDatetime = Field(default_factory=utc_now)
 
 
 # ---------------------------------------------------------------------------
@@ -416,9 +547,15 @@ class MessageEnvelope(ProtocolModel):
     sequence_number: Optional[int] = Field(default=None, ge=0)
     correlation_id: Optional[UUID] = None
     causation_id: Optional[UUID] = None
-    created_at: datetime = Field(default_factory=utc_now)
+    created_at: AwareDatetime = Field(default_factory=utc_now)
     world_tick: Optional[int] = Field(default=None, ge=0)
     payload: dict[str, Any]
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> "MessageEnvelope":
+        # Nested courier envelopes take this same path recursively.
+        parse_payload(self)
+        return self
 
     @field_validator("schema_version")
     @classmethod
@@ -438,6 +575,12 @@ PAYLOAD_MODELS: dict[MessageType, type[BaseModel]] = {
     MessageType.WORLD_SNAPSHOT: WorldSnapshot,
     MessageType.OBSERVATION: Observation,
     MessageType.BELIEF_UPDATE: BeliefUpdate,
+    MessageType.BELIEF_SNAPSHOT: TeamBeliefSnapshot,
+    MessageType.FLOOD_UPDATE: FloodUpdate,
+    MessageType.AGENT_STATUS: AgentStatus,
+    MessageType.DRONE_STATUS: DroneState,
+    MessageType.AI_REQUEST: AIRescueRequest,
+    MessageType.AI_RECOMMENDATION: AIRescueRecommendation,
     MessageType.CIVILIAN_STATUS_UPDATE: CivilianStatusUpdate,
     MessageType.TASK_CLAIM: TaskClaim,
     MessageType.TASK_CLAIM_RESOLUTION: TaskClaimResolution,
@@ -465,8 +608,11 @@ def make_message(
     world_tick: Optional[int] = None,
 ) -> MessageEnvelope:
     """Create a standard envelope from a typed payload."""
+    message_type = MessageType(message_type)
     expected_model = PAYLOAD_MODELS.get(message_type)
-    if expected_model is not None and not isinstance(payload, expected_model):
+    if expected_model is None:
+        raise ValueError(f"No payload model registered for {message_type.value}")
+    if not isinstance(payload, expected_model):
         raise TypeError(
             f"{message_type.value} expects {expected_model.__name__}, "
             f"not {type(payload).__name__}"
@@ -498,6 +644,7 @@ def parse_payload(envelope: MessageEnvelope) -> BaseModel:
 
 def serialize_message(envelope: MessageEnvelope) -> str:
     """Serialize an envelope for transport or persistence."""
+    parse_payload(envelope)
     return envelope.model_dump_json()
 
 
@@ -507,6 +654,12 @@ def deserialize_message(raw: str) -> MessageEnvelope:
 
 
 __all__ = [
+    "FloodUpdate",
+    "AgentStatus",
+    "AreaInformationFreshness",
+    "DroneState",
+    "TeamBeliefSnapshot",
+    "AIRescueRequest",
     "SCHEMA_VERSION",
     "AgentRole",
     "MessageType",
