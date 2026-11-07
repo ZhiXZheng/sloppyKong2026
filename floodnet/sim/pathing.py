@@ -5,9 +5,19 @@ from __future__ import annotations
 from collections import deque
 from typing import Callable
 
-from floodnet.models import Pos
+from schema import GridPosition
+
+Pos = tuple[int, int]
 
 NEIGHBOURS: tuple[Pos, ...] = ((0, -1), (1, 0), (0, 1), (-1, 0))
+
+
+def gp(pos: Pos) -> GridPosition:
+    return GridPosition(x=pos[0], y=pos[1])
+
+
+def tup(pos: GridPosition) -> Pos:
+    return (pos.x, pos.y)
 
 
 def manhattan(a: Pos, b: Pos) -> int:
