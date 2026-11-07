@@ -103,14 +103,15 @@ class EntityType(str, Enum):
 
 
 class CivilianStatus(str, Enum):
-    """DELIVERED and legacy RESCUED both mean safely at shelter; score once."""
+    """DELIVERED means safely at shelter. LOST means the group's cell flooded
+    before pickup. Both are terminal."""
     UNKNOWN = "unknown"
     REPORTED = "reported"
     AVAILABLE = "available"
     CLAIMED = "claimed"
     PICKED_UP = "picked_up"
     DELIVERED = "delivered"
-    RESCUED = "rescued"
+    LOST = "lost"
 
 
 class ClaimStatus(str, Enum):
