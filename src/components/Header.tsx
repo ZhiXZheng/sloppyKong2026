@@ -1,3 +1,7 @@
+/**
+ * Operator playback, speed, scenario, and radio controls. All state changes are delegated to the
+ * shared simulation store.
+ */
 import React from 'react';
 import { useSimulationStore } from '../store/simulationStore';
 import {
@@ -15,6 +19,7 @@ import {
   AlertTriangle
 } from 'lucide-react';
 
+/** Bind operator controls to store actions without maintaining a second copy of world state. */
 export const Header: React.FC = () => {
   const {
     world,

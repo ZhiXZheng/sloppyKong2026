@@ -21,6 +21,7 @@ class AISettings:
     enabled: bool = True
 
 
+# Return one proposed action, outgoing protocol messages, and team-local UI diagnostics together.
 @dataclass
 class Decision:
     action: ActionProposal
@@ -28,7 +29,10 @@ class Decision:
     ui: dict
 
 
+# Drive a protocol-aware team using only its local beliefs and authoritative action
+# acknowledgements.
 class RescueController:
+    # Initialize isolated belief, claim, AI-context, and outstanding-action state for one team.
     def __init__(self, team_id, seed=0, ai_service=None, settings=None,
                  runtime=None, unknown_traversable=True):
         self.team_id = team_id
@@ -58,6 +62,7 @@ class RescueController:
         """Accept A's local sensing; publish this team's new observations to C."""
         self._observe(observations, publish=True)
 
+    # Merge observations and trigger advice only when meaningful new civilian evidence arrives.
     def _observe(self, observations, publish=False):
         for observation in observations:
             known = self.beliefs.get(observation.entity.entity_type, observation.entity.entity_id)
@@ -67,6 +72,8 @@ class RescueController:
             if changed and known is None and observation.entity.entity_type == EntityType.CIVILIAN_GROUP:
                 self._trigger = True
 
+    # Deduplicate and unpack delivered envelopes without granting access to global world
+    # snapshots.
     def receive(self, envelopes):
         for envelope in envelopes:
             if envelope.recipient_id not in (None, self.team_id):
@@ -89,7 +96,7 @@ class RescueController:
             elif isinstance(payload, CivilianStatusUpdate):
                 known = self.beliefs.get(EntityType.CIVILIAN_GROUP, payload.civilian_group_id)
                 details = dict(known.details) if known else {}
-                if payload.status in (CivilianStatus.PICKED_UP, CivilianStatus.DELIVERED, CivilianStatus.RESCUED):
+                if payload.status in (CivilianStatus.PICKED_UP, CivilianStatus.DELIVERED):
                     details["picked_up_by_team_id"] = payload.changed_by_team_id
                 details["delivered_to_shelter_id"] = payload.delivered_to_shelter_id
                 self._observe([Observation(observation_id=envelope.event_id,
@@ -101,12 +108,14 @@ class RescueController:
                     position=known.position if known else None, details=details)])
             # WORLD_SNAPSHOT/FLOOD_UPDATE are intentionally not global team knowledge.
 
+    # Bump the decision context so older model replies cannot redirect the current task.
     def _invalidate(self, reason):
         self.context_version += 1
         self._ready_recommendation = None
         if self.ai:
             self.ai.invalidate(self.team_id, reason)
 
+    # Preserve protocol provenance while queueing a team-authored observation or claim.
     def _emit(self, message_type, payload):
         self._outbound.append(MessageEnvelope(message_type=message_type,
             message_id=self.runtime.new_id("message"), event_id=self.runtime.new_id("event"),
@@ -114,6 +123,7 @@ class RescueController:
             neighbourhood_id=self._area, world_tick=self._tick,
             created_at=self.runtime.timestamp(self._tick), payload=payload.model_dump(mode="json")))
 
+    # Advance this team's claim version and publish its terminal/released state.
     def _finish_claim(self, group_id, status):
         claim = self.beliefs.own_active_claim(group_id)
         if claim:
@@ -121,6 +131,7 @@ class RescueController:
             if self.beliefs.merge_claim(updated):
                 self._emit(MessageType.TASK_CLAIM, updated)
 
+    # Release an old reservation and invalidate AI context when the selected task changes.
     def _set_target(self, target):
         if target == self.target:
             return
@@ -129,6 +140,7 @@ class RescueController:
         self.target = target
         self._invalidate("Target changed")
 
+    # Reconcile one authoritative action acknowledgement without inventing map facts on rejection.
     def apply_result(self, result):
         if result.team_id != self.team_id or result.action_id in self._terminal_results:
             return
@@ -155,6 +167,7 @@ class RescueController:
             self._trigger = True
         # A supplies the next own_state; generic errors never invent map facts.
 
+    # Combine local sensing, claims, bounded AI advice, and safe fallback into the next proposal.
     def step(self, own_state, connectivity, world_tick, monotonic_now=None):
         if own_state.team_id != self.team_id:
             raise ValueError("Controller received another team's state")

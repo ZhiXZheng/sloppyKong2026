@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 
+# Run shared-schema and Person B unittest suites with a process exit status matching their result.
 def main():
     root = Path(__file__).resolve().parents[1]
     suite = unittest.TestSuite([

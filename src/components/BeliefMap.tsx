@@ -1,3 +1,7 @@
+/**
+ * Render only a team's local observations so unknown cells remain visibly distinct from known
+ * dry or flooded ground.
+ */
 import React, { useEffect, useState } from 'react';
 import { TeamBeliefMap, GridPosition } from '../types/simulation';
 
@@ -8,6 +12,7 @@ interface BeliefMapProps {
   teamCallsign: string;
 }
 
+/** Convert received observations to a compact local-knowledge grid. */
 export const BeliefMap: React.FC<BeliefMapProps> = ({
   belief,
   teamPosition,

@@ -12,18 +12,22 @@ Pos = tuple[int, int]
 NEIGHBOURS: tuple[Pos, ...] = ((0, -1), (1, 0), (0, 1), (-1, 0))
 
 
+# Validate a tuple as a protocol grid position at a simulation boundary.
 def gp(pos: Pos) -> GridPosition:
     return GridPosition(x=pos[0], y=pos[1])
 
 
+# Convert a protocol position to a hashable tuple for sets and path searches.
 def tup(pos: GridPosition) -> Pos:
     return (pos.x, pos.y)
 
 
+# Measure cardinal ground distance without allowing diagonal shortcuts.
 def manhattan(a: Pos, b: Pos) -> int:
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
 
+# Measure square sensor range or per-axis drone flight distance.
 def chebyshev(a: Pos, b: Pos) -> int:
     return max(abs(a[0] - b[0]), abs(a[1] - b[1]))
 
@@ -61,6 +65,7 @@ def bfs_path(
     return None
 
 
+# Return only the first step of a reachable route; no route means no proposed movement.
 def next_step(
     start: Pos,
     goal: Pos,

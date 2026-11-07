@@ -1,3 +1,7 @@
+/**
+ * Present rescue totals, shelter occupancy, connectivity, and drone operator controls from the
+ * current snapshot.
+ */
 import React from 'react';
 import { useSimulationStore } from '../store/simulationStore';
 import {
@@ -15,6 +19,7 @@ import {
   Layers
 } from 'lucide-react';
 
+/** Summarize people rescued and expose launch, pause, and return commands. */
 export const OperationalOverview: React.FC = () => {
   const { world, launchDrone, pauseDrone, returnDrone } = useSimulationStore();
   const { stats, radioConnected, drone, teams, shelter } = world;

@@ -1,3 +1,7 @@
+/**
+ * Dashboard composition and playback clock. Simulation state comes from the store; presentation
+ * does not decide missions.
+ */
 import React, { useEffect } from 'react';
 import { useSimulationStore } from './store/simulationStore';
 import { Header } from './components/Header';
@@ -7,6 +11,7 @@ import { OperationalOverview } from './components/OperationalOverview';
 import { EventFeed } from './components/EventFeed';
 import { EntityDetailModal } from './components/EntityDetailModal';
 
+/** Initialize the backend snapshot and schedule playback at 20 seconds divided by the selected speed. */
 export const App: React.FC = () => {
   const { world, isRunning, speed, stepTick, selectEntity, init } = useSimulationStore();
 
@@ -19,7 +24,7 @@ export const App: React.FC = () => {
   useEffect(() => {
     if (!isRunning) return;
 
-    const intervalMs = speed === 4 ? 250 : speed === 2 ? 500 : 1000;
+    const intervalMs = 20_000 / speed; // 1x: 20s, 2x: 10s, 4x: 5s
     const interval = setInterval(() => {
       stepTick();
     }, intervalMs);

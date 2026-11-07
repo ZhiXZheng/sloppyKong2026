@@ -1,3 +1,7 @@
+/**
+ * Offline browser demonstration tick pipeline: sensing, communication, courier delivery, rescue
+ * actions, and statistics.
+ */
 import {
   SimulationWorld,
   SimulationEvent,

@@ -1,3 +1,7 @@
+/**
+ * Browser demo claim arbitration with deterministic distance/team tie-breaking and explicit
+ * event reporting.
+ */
 import {
   CivilianGroup,
   RescueTeam,

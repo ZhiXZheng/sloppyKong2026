@@ -4,10 +4,12 @@ import json
 import textwrap
 
 
+# Format optional protocol positions for human-readable terminal events.
 def position(value):
     return f"({value['x']}, {value['y']})" if value else "unknown"
 
 
+# Turn recorded protocol/action events into readable operational explanations.
 def event_text(event):
     kind = event["type"]
     team = f"Team {event['team'].upper()}" if event.get("team") else "Network"
@@ -58,6 +60,7 @@ def event_text(event):
     return json.dumps(event)
 
 
+# Print one comparison tick while wrapping long AI reasons to terminal width.
 def print_tick(record):
     scenario = (f"Drone {'ON' if record['drone_on'] else 'OFF'} | Seed {record['seed']}"
                 if record["scenario"] == "comparison" else "Border conflict")
@@ -73,12 +76,14 @@ def print_tick(record):
     print(flush=True)
 
 
+# Show the final people-rescued comparison for a single deterministic run.
 def print_summary(result):
     print(f"\n{'=' * 64}\n"
           f"FINAL | Drone {'ON' if result['drone_on'] else 'OFF'} | Seed {result['seed']} | "
           f"Rescued {result['rescued']}/{result['total']}\n{'=' * 64}", flush=True)
 
 
+# Display both teams' final border-task choices after reconnection.
 def print_border_summary(targets):
     print("\nBorder targets after reconnect:")
     for team, target in sorted(targets.items()):

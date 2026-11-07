@@ -32,6 +32,7 @@ def decision_events(decision):
              action=decision.action.model_dump(mode="json"))]
 
 
+# Run scripted integration fixtures with and without courier delivery for a controlled comparison.
 def run_comparison(drone_on=True, seed=42, ticks=30, on_tick=None):
     runtime = Runtime(f"demo/{seed}")
     controllers = {team: RescueController(team, seed=seed, settings=AISettings(False))
@@ -44,6 +45,7 @@ def run_comparison(drone_on=True, seed=42, ticks=30, on_tick=None):
     revisions = {group: 0 for group in groups}
     actions, events, tick_events, initial_events = [], [], [], []
 
+    # Export authoritative fixture state for replay without feeding it into local controllers.
     def world_view(tick):
         return dict(width=20, height=20,
             rescue_teams=[states[team].model_dump(mode="json") for team in sorted(states)],
@@ -53,6 +55,7 @@ def run_comparison(drone_on=True, seed=42, ticks=30, on_tick=None):
 
     initial_world = world_view(-1)
 
+    # Attach deterministic provenance to a fixture's local civilian report.
     def observe(group_id, tick, observer):
         group = groups[group_id]
         return Observation(observation_id=runtime.new_id("observation"), observer_id=observer,
@@ -224,6 +227,7 @@ def border_conflict(on_tick=None):
     return {controller.team_id: controller.target for controller in controllers}
 
 
+# Configure comparison output, optional playback, and the deterministic demonstration seed.
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=42)
@@ -245,6 +249,7 @@ def main():
         return
     from .console import print_tick, print_summary, print_border_summary
 
+    # Emit one recorded tick in machine-readable form for downstream replay tools.
     def print_json_tick(record):
         print(json.dumps(record), flush=True)
 

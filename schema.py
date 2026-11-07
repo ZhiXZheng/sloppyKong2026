@@ -59,6 +59,7 @@ class ProtocolModel(BaseModel):
 # Shared identifiers and enumerations
 # ---------------------------------------------------------------------------
 
+# Identify the protocol participant that authored a message.
 class AgentRole(str, Enum):
     RESCUE_TEAM = "rescue_team"
     COURIER_DRONE = "courier_drone"
@@ -66,6 +67,7 @@ class AgentRole(str, Enum):
     DASHBOARD = "dashboard"
 
 
+# Enumerate supported payload categories for envelope validation and dispatch.
 class MessageType(str, Enum):
     # Simulation/world information
     WORLD_SNAPSHOT = "world.snapshot"
@@ -95,6 +97,7 @@ class MessageType(str, Enum):
     DRONE_STATUS = "courier.status"
 
 
+# Distinguish entity identities so observations cannot confuse groups, teams, and cells.
 class EntityType(str, Enum):
     CIVILIAN_GROUP = "civilian_group"
     SHELTER = "shelter"
@@ -114,6 +117,7 @@ class CivilianStatus(str, Enum):
     LOST = "lost"
 
 
+# Represent claim arbitration and terminal ownership states independently of civilian lifecycle.
 class ClaimStatus(str, Enum):
     PROVISIONAL = "provisional"
     CONFIRMED = "confirmed"
@@ -122,6 +126,7 @@ class ClaimStatus(str, Enum):
     COMPLETED = "completed"
 
 
+# Restrict proposals to the actions the authoritative world knows how to validate.
 class ActionType(str, Enum):
     MOVE = "move"
     PICKUP = "pickup"
@@ -129,6 +134,7 @@ class ActionType(str, Enum):
     WAIT = "wait"
 
 
+# Describe whether a proposal was accepted, rejected, failed, or completed.
 class ActionStatus(str, Enum):
     ACCEPTED = "accepted"
     REJECTED = "rejected"
@@ -136,12 +142,14 @@ class ActionStatus(str, Enum):
     FAILED = "failed"
 
 
+# Represent transport connectivity independently of agent lifecycle.
 class LinkState(str, Enum):
     UP = "up"
     DOWN = "down"
     DEGRADED = "degraded"
 
 
+# Represent whether an agent can participate in operational decisions.
 class AgentState(str, Enum):
     ONLINE = "online"
     OFFLINE = "offline"
@@ -152,16 +160,19 @@ class AgentState(str, Enum):
 # Geometry and world entities
 # ---------------------------------------------------------------------------
 
+# Validate the shared 20-by-20 protocol coordinate bounds.
 class GridPosition(ProtocolModel):
     x: int = Field(ge=0, le=19)
     y: int = Field(ge=0, le=19)
 
 
+# Pair entity type and ID so relayed facts retain an unambiguous subject.
 class EntityReference(ProtocolModel):
     entity_type: EntityType
     entity_id: str = Field(min_length=1)
 
 
+# Represent a whole rescue group, including its authoritative pickup and delivery ownership.
 class CivilianGroup(ProtocolModel):
     group_id: str = Field(min_length=1)
     position: GridPosition
@@ -179,6 +190,7 @@ class Shelter(ProtocolModel):
     capacity: Optional[int] = Field(default=None, ge=0)
     occupants: int = Field(default=0, ge=0)
 
+    # Reject occupancy that exceeds a finite shelter capacity.
     @model_validator(mode="after")
     def validate_capacity(self) -> "Shelter":
         if self.capacity is not None and self.occupants > self.capacity:
@@ -196,6 +208,7 @@ class RescueTeamState(ProtocolModel):
     neighbourhood_id: str = Field(min_length=1)
     carried_group_ids: list[str] = Field(default_factory=list)
 
+    # Keep passenger totals, carried group identities, and capacity mutually consistent.
     @model_validator(mode="after")
     def validate_capacity(self) -> "RescueTeamState":
         if self.carried_civilians > self.capacity:
@@ -272,6 +285,7 @@ class TaskClaim(ProtocolModel):
     expires_at: Optional[AwareDatetime] = None
     reason: Optional[str] = None
 
+    # Require a claim expiry to occur after the original claim timestamp.
     @model_validator(mode="after")
     def validate_expiry(self) -> "TaskClaim":
         if self.expires_at and self.expires_at <= self.claimed_at:
@@ -279,6 +293,7 @@ class TaskClaim(ProtocolModel):
         return self
 
 
+# Record the arbitration winner and monotonic resolution version for a civilian group.
 class TaskClaimResolution(ProtocolModel):
     civilian_group_id: str = Field(min_length=1)
     winning_team_id: Optional[str] = None
@@ -290,6 +305,7 @@ class TaskClaimResolution(ProtocolModel):
     resolved_at_tick: int = Field(ge=0)
     resolution_version: int = Field(ge=1)
 
+    # Require winner identifiers and resolved claim status to agree.
     @model_validator(mode="after")
     def validate_winner(self) -> "TaskClaimResolution":
         if (self.winning_team_id is None) != (self.winning_claim_id is None):
@@ -316,6 +332,7 @@ class ActionProposal(ProtocolModel):
     explanation: Optional[str] = None
     proposed_at: AwareDatetime = Field(default_factory=utc_now)
 
+    # Require the appropriate position or entity target for the proposed action kind.
     @model_validator(mode="after")
     def validate_action_target(self) -> "ActionProposal":
         if self.action_type == ActionType.MOVE and self.target_position is None:
@@ -340,6 +357,7 @@ class ActionResult(ProtocolModel):
     message: Optional[str] = None
 
 
+# Publish a civilian lifecycle transition with its authoritative source tick and revision.
 class CivilianStatusUpdate(ProtocolModel):
     civilian_group_id: str = Field(min_length=1)
     status: CivilianStatus
@@ -354,6 +372,7 @@ class CivilianStatusUpdate(ProtocolModel):
 # Network and courier-drone protocols
 # ---------------------------------------------------------------------------
 
+# Describe the state of a particular network link without changing agent beliefs automatically.
 class NetworkLinkStatus(ProtocolModel):
     link_id: str = Field(min_length=1)
     neighbourhood_a: str = Field(min_length=1)
@@ -362,6 +381,7 @@ class NetworkLinkStatus(ProtocolModel):
     changed_at: AwareDatetime = Field(default_factory=utc_now)
 
 
+# Report an agent's liveness separately from its observations and rescue claims.
 class Heartbeat(ProtocolModel):
     agent_id: str = Field(min_length=1)
     role: AgentRole
@@ -378,6 +398,7 @@ class FloodUpdate(ProtocolModel):
     flood_cells: list[GridPosition] = Field(default_factory=list)
 
 
+# Expose connectivity and decision context used to gate stale or unavailable AI advice.
 class AgentStatus(ProtocolModel):
     agent_id: str = Field(min_length=1)
     neighbourhood_id: str = Field(min_length=1)
@@ -388,6 +409,7 @@ class AgentStatus(ProtocolModel):
     current_target_id: Optional[str] = None
     decision_context_version: int = Field(ge=1)
 
+    # Require radio, the AI switch, and an operational agent state before dispatching team advice.
     @property
     def ai_available(self) -> bool:
         return self.radio_connected and self.ai_enabled and self.state != AgentState.OFFLINE
@@ -400,6 +422,7 @@ class AreaInformationFreshness(ProtocolModel):
     latest_observed_tick: Optional[int] = Field(default=None, ge=0)
 
 
+# Carry physical courier state and reported area freshness; unknown freshness remains explicit.
 class DroneState(ProtocolModel):
     drone_id: str = Field(min_length=1)
     position: GridPosition
@@ -444,6 +467,7 @@ class RelayedMessage(ProtocolModel):
     picked_up_at: AwareDatetime = Field(default_factory=utc_now)
     original_sender_id: str = Field(min_length=1)
 
+    # Ensure courier wrapping preserves the original envelope's sender identity.
     @model_validator(mode="after")
     def validate_sender(self) -> "RelayedMessage":
         if self.original_sender_id != self.envelope.sender_id:
@@ -451,6 +475,7 @@ class RelayedMessage(ProtocolModel):
         return self
 
 
+# Group original envelopes with explicit departure, delivery, and source/destination metadata.
 class CourierPacket(ProtocolModel):
     packet_id: UUID = Field(default_factory=uuid4)
     drone_id: str = Field(min_length=1)
@@ -460,6 +485,7 @@ class CourierPacket(ProtocolModel):
     departed_at: AwareDatetime = Field(default_factory=utc_now)
     delivered_at: Optional[AwareDatetime] = None
 
+    # Reject transport history that delivers a packet before it departed.
     @model_validator(mode="after")
     def validate_delivery_time(self) -> "CourierPacket":
         if self.delivered_at and self.delivered_at < self.departed_at:
@@ -467,6 +493,7 @@ class CourierPacket(ProtocolModel):
         return self
 
 
+# Acknowledge courier delivery without rewriting the original messages.
 class CourierReceipt(ProtocolModel):
     packet_id: UUID
     drone_id: str = Field(min_length=1)
@@ -552,12 +579,14 @@ class MessageEnvelope(ProtocolModel):
     world_tick: Optional[int] = Field(default=None, ge=0)
     payload: dict[str, Any]
 
+    # Validate the payload model selected by the message type at the receive boundary.
     @model_validator(mode="after")
     def validate_payload(self) -> "MessageEnvelope":
         # Nested courier envelopes take this same path recursively.
         parse_payload(self)
         return self
 
+    # Reject envelopes using incompatible protocol versions instead of partially accepting them.
     @field_validator("schema_version")
     @classmethod
     def supported_schema_version(cls, value: str) -> str:

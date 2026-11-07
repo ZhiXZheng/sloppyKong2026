@@ -1,3 +1,7 @@
+/**
+ * Development server configuration: serve the frontend and proxy local /api requests to Python
+ * on port 8000.
+ */
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 

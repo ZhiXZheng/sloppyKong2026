@@ -1,3 +1,7 @@
+/**
+ * Sensor-limited browser belief updates. Delivered observations augment local knowledge without
+ * granting access to unseen world cells.
+ */
 import {
   CellObservation,
   CivilianGroup,

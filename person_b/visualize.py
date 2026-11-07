@@ -7,6 +7,7 @@ from .console import event_text
 from .demo import run_comparison
 
 
+# Build replay frames from actual comparison outcomes rather than synthesizing rescue positions.
 def replay_data(seed=42, ticks=30):
     runs = []
     for enabled in (True, False):
@@ -22,6 +23,7 @@ def replay_data(seed=42, ticks=30):
     return dict(seed=seed, runs=runs)
 
 
+# Embed escaped replay JSON into the standalone HTML template and write the output artifact.
 def create_replay(seed=42, ticks=30, output=None):
     if ticks < 1:
         raise ValueError("ticks must be positive")

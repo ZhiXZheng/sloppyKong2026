@@ -11,6 +11,8 @@ from .beliefs import BeliefStore
 from .runtime import Runtime
 
 
+# Require an explicit live flag before making one bounded paid request and reporting sanitized
+# diagnostics.
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true", help="Make one paid Claude request using .env API_KEY")

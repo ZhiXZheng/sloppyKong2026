@@ -1,3 +1,7 @@
+/**
+ * SVG view of authoritative cells, entities, and actual planned routes. Network state remains in
+ * the header/banner; decorative radio corridors are removed.
+ */
 import React, { useState } from 'react';
 import { useSimulationStore } from '../store/simulationStore';
 import {
@@ -6,7 +10,6 @@ import {
   RotateCcw,
   Layers,
   Eye,
-  Radio,
   WifiOff,
   Navigation,
   Shield,
@@ -16,6 +19,7 @@ import {
 } from 'lucide-react';
 import { GridPosition } from '../types/simulation';
 
+/** Render grid geometry and selectable entities while leaving all movement decisions to the simulation. */
 export const SimulationMap: React.FC = () => {
   const { world, overlays, toggleOverlay, selectEntity, selectedEntity } =
     useSimulationStore();
@@ -28,16 +32,18 @@ export const SimulationMap: React.FC = () => {
   const mapWidth = gridSize * cellSize; // 720
   const mapHeight = gridSize * cellSize; // 720
 
+  /** Clamp visual magnification; this never changes grid coordinates or routes. */
   const handleZoom = (delta: number) => {
     setZoomLevel(prev => Math.min(Math.max(0.8, prev + delta), 2.2));
   };
 
+  /** Restore map presentation without resetting simulation progress. */
   const handleResetView = () => {
     setZoomLevel(1);
     setPan({ x: 0, y: 0 });
   };
 
-  const { cells, teams, civilians, shelter, drone, neighbourhoods, radioConnected } = world;
+  const { cells, teams, civilians, shelter, drone, radioConnected } = world;
 
   // Drone route SVG path string
   const droneRoutePath = drone.routeWaypoints
@@ -85,15 +91,6 @@ export const SimulationMap: React.FC = () => {
               title="Toggle Flood Overlay"
             >
               Water
-            </button>
-            <button
-              onClick={() => toggleOverlay('coverage')}
-              className={`px-1.5 py-0.5 rounded transition-colors ${
-                overlays.coverage ? 'bg-cyan-900/70 text-cyan-300 font-bold' : 'text-slate-500'
-              }`}
-              title="Toggle Radio Coverage Zones"
-            >
-              Radio Zones
             </button>
             <button
               onClick={() => toggleOverlay('routes')}
@@ -200,7 +197,7 @@ export const SimulationMap: React.FC = () => {
                 } else if (cell.waterDepth === 2) {
                   fillColor = '#1d4ed8'; // Medium flood
                 } else {
-                  fillColor = '#0f172a'; // Deep water channel
+                  fillColor = '#1d4ed8'; // Initial channel matches spreading floodwater
                 }
               }
 
@@ -233,121 +230,8 @@ export const SimulationMap: React.FC = () => {
             })
           )}
 
-          {/* 2. Communication Coverage Neighbourhoods */}
-          {overlays.coverage && (
-            <>
-              {/* Alpha Sector Coverage */}
-              <circle
-                cx={neighbourhoods.alpha.center.x * cellSize + cellSize / 2}
-                cy={neighbourhoods.alpha.center.y * cellSize + cellSize / 2}
-                r={neighbourhoods.alpha.radius * cellSize}
-                fill="#0284c7"
-                fillOpacity={0.08}
-                stroke="#38bdf8"
-                strokeWidth={1.5}
-                strokeDasharray="4 3"
-              />
-              <text
-                x={neighbourhoods.alpha.center.x * cellSize + cellSize / 2}
-                y={neighbourhoods.alpha.center.y * cellSize - neighbourhoods.alpha.radius * cellSize + 16}
-                fill="#38bdf8"
-                fontSize="10"
-                fontFamily="monospace"
-                textAnchor="middle"
-                opacity={0.7}
-              >
-                ALPHA RADIO CORRIDOR
-              </text>
-
-              {/* Bravo Sector Coverage */}
-              <circle
-                cx={neighbourhoods.bravo.center.x * cellSize + cellSize / 2}
-                cy={neighbourhoods.bravo.center.y * cellSize + cellSize / 2}
-                r={neighbourhoods.bravo.radius * cellSize}
-                fill="#16a34a"
-                fillOpacity={0.08}
-                stroke="#22c55e"
-                strokeWidth={1.5}
-                strokeDasharray="4 3"
-              />
-              <text
-                x={neighbourhoods.bravo.center.x * cellSize + cellSize / 2}
-                y={neighbourhoods.bravo.center.y * cellSize + neighbourhoods.bravo.radius * cellSize - 6}
-                fill="#22c55e"
-                fontSize="10"
-                fontFamily="monospace"
-                textAnchor="middle"
-                opacity={0.7}
-              >
-                BRAVO RADIO CORRIDOR
-              </text>
-            </>
-          )}
-
-          {/* 3. Inter-Neighbourhood Radio Beam */}
-          {overlays.coverage && (
-            <g>
-              {radioConnected ? (
-                <>
-                  <line
-                    x1={neighbourhoods.alpha.center.x * cellSize + cellSize / 2}
-                    y1={neighbourhoods.alpha.center.y * cellSize + cellSize / 2}
-                    x2={neighbourhoods.bravo.center.x * cellSize + cellSize / 2}
-                    y2={neighbourhoods.bravo.center.y * cellSize + cellSize / 2}
-                    stroke="#06b6d4"
-                    strokeWidth={2.5}
-                    filter="url(#glow-cyan)"
-                  />
-                  <line
-                    x1={neighbourhoods.alpha.center.x * cellSize + cellSize / 2}
-                    y1={neighbourhoods.alpha.center.y * cellSize + cellSize / 2}
-                    x2={neighbourhoods.bravo.center.x * cellSize + cellSize / 2}
-                    y2={neighbourhoods.bravo.center.y * cellSize + cellSize / 2}
-                    stroke="#ffffff"
-                    strokeWidth={1}
-                    strokeDasharray="6 4"
-                    className="animate-pulse"
-                  />
-                  <text
-                    x={((neighbourhoods.alpha.center.x + neighbourhoods.bravo.center.x) / 2) * cellSize}
-                    y={((neighbourhoods.alpha.center.y + neighbourhoods.bravo.center.y) / 2) * cellSize - 10}
-                    fill="#06b6d4"
-                    fontSize="10"
-                    fontFamily="monospace"
-                    textAnchor="middle"
-                    className="font-bold"
-                  >
-                    WIRELESS RADIO LINK: ACTIVE
-                  </text>
-                </>
-              ) : (
-                <>
-                  <line
-                    x1={neighbourhoods.alpha.center.x * cellSize + cellSize / 2}
-                    y1={neighbourhoods.alpha.center.y * cellSize + cellSize / 2}
-                    x2={neighbourhoods.bravo.center.x * cellSize + cellSize / 2}
-                    y2={neighbourhoods.bravo.center.y * cellSize + cellSize / 2}
-                    stroke="#ef4444"
-                    strokeWidth={2}
-                    strokeDasharray="6 6"
-                    filter="url(#glow-red)"
-                  />
-                  <text
-                    x={((neighbourhoods.alpha.center.x + neighbourhoods.bravo.center.x) / 2) * cellSize}
-                    y={((neighbourhoods.alpha.center.y + neighbourhoods.bravo.center.y) / 2) * cellSize - 10}
-                    fill="#ef4444"
-                    fontSize="10"
-                    fontFamily="monospace"
-                    textAnchor="middle"
-                    className="font-bold"
-                  >
-                    LINK SEVERED (BLACKOUT)
-                  </text>
-                </>
-              )}
-            </g>
-          )}
-
+          {/* Radio connectivity is shown in the header/banner; decorative
+              corridor circles and the fixed inter-sector beam are intentionally absent. */}
           {/* 4. Routes (Team & Drone) */}
           {overlays.routes && (
             <>
@@ -654,7 +538,7 @@ export const SimulationMap: React.FC = () => {
             <span>Moderate</span>
           </div>
           <div className="flex items-center gap-1">
-            <span className="w-2.5 h-2 bg-[#0f172a]" />
+            <span className="w-2.5 h-2 bg-[#1d4ed8]" />
             <span>Deep Flood</span>
           </div>
         </div>

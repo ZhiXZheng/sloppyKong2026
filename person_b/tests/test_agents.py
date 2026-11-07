@@ -1,3 +1,4 @@
+# Regress team-local beliefs, claim tombstones, safe target selection, and acknowledgement handling.
 import unittest
 
 from schema import (

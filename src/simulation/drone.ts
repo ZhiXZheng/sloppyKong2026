@@ -1,3 +1,7 @@
+/**
+ * Legacy browser-only courier shuttle. The live dashboard uses the Python multi-agent drone
+ * system.
+ */
 import {
   DroneState,
   GridPosition,
@@ -7,6 +11,7 @@ import {
 } from '../types/simulation';
 import { applyObservationsToBelief } from './beliefs';
 
+/** Advance the standalone browser courier and apply packets only on arrival at the destination depot. */
 export function updateDroneStep(
   drone: DroneState,
   alphaBelief: TeamBeliefMap,

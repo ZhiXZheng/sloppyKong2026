@@ -12,6 +12,7 @@ from floodnet.sim.pathing import NEIGHBOURS, Pos, gp
 from schema import CivilianGroup, DroneState, RescueTeamState, Shelter
 
 
+# Collect scenario geometry, sensor radii, movement limits, and seeded flood parameters.
 class ScenarioConfig(BaseModel):
     name: str
     seed: int = 42
@@ -69,14 +70,17 @@ def compute_flood_ticks(cfg: ScenarioConfig) -> dict[Pos, int]:
     return arrival
 
 
+# Generate the protected southern high-ground cells used by the sample scenarios.
 def _strip(y_from: int, width: int, height: int) -> list[Pos]:
     return [(x, y) for y in range(y_from, height) for x in range(width)]
 
 
+# Build an initially empty rescue team with its home neighbourhood.
 def _team(team_id: str, pos: Pos, area: str) -> RescueTeamState:
     return RescueTeamState(team_id=team_id, position=gp(pos), capacity=6, neighbourhood_id=area)
 
 
+# Build a whole civilian group that must fit within a team's capacity.
 def _group(group_id: str, pos: Pos, size: int) -> CivilianGroup:
     return CivilianGroup(group_id=group_id, position=gp(pos), size=size)
 
@@ -134,6 +138,7 @@ def small_scenario() -> ScenarioConfig:
 SCENARIOS = {"default": default_scenario, "small": small_scenario}
 
 
+# Instantiate a fresh named scenario so mutable runs never share scenario state.
 def load_scenario(name: str = "default") -> ScenarioConfig:
     return SCENARIOS[name]()
 

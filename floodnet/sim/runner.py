@@ -15,6 +15,7 @@ from floodnet.sim.simple_agents import SimpleDrone, SimpleTeam
 from floodnet.sim.world import World
 
 
+# Construct local belief holders and deterministic controllers for the standalone demo.
 def build_simple_agents(world: World) -> dict:
     sp = tup(world.shelter.position)
     agents: dict = {}
@@ -26,6 +27,7 @@ def build_simple_agents(world: World) -> dict:
     return agents
 
 
+# Sense locally, collect one action per agent, and let the world validate all mutations.
 def step_simple(world: World, agents: dict):
     obs = world.observe_all()
     proposals = []
@@ -37,6 +39,7 @@ def step_simple(world: World, agents: dict):
     return world.step(proposals)
 
 
+# Draw authoritative positions and rescue totals as a compact terminal grid.
 def render(world: World) -> str:
     grid = [["~" if (x, y) in world.flooded else "." for x in range(world.width)]
             for y in range(world.height)]
@@ -62,6 +65,7 @@ def render(world: World) -> str:
     return header + "\n" + legend + "\n" + "\n".join(" ".join(row) for row in grid)
 
 
+# Fit the map and recent events within the current terminal height.
 def _frame(world: World, recent: list[str]) -> str:
     board = render(world)
     rows = shutil.get_terminal_size((80, 40)).lines
@@ -106,6 +110,7 @@ def run(scenario: str = "default", ticks: int | None = None, delay: float = 0.0,
     return world
 
 
+# Parse scenario/playback options and start the standalone deterministic demonstration.
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--scenario", default="default")

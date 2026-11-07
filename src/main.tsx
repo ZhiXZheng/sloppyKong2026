@@ -1,3 +1,6 @@
+/**
+ * Browser entry point: mount the dashboard once and load its shared stylesheet.
+ */
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';

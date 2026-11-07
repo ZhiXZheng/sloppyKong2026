@@ -1,3 +1,4 @@
+# Protocol usage sketch; current producers must also provide the required tick and entity-revision fields.
 from schema import *
 
 observation = Observation(

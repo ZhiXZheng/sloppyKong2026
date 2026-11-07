@@ -1,3 +1,8 @@
+/**
+ * Dashboard data contracts. Capacities and rescue totals count people; positions are grid cells
+ * and diagnostic delays are seconds.
+ */
+/** Zero-based cell coordinates; movement uses simulation validation, not pixel positions. */
 export interface GridPosition {
   x: number;
   y: number;
@@ -5,6 +10,7 @@ export interface GridPosition {
 
 export type CivilianStatus = 'available' | 'claimed' | 'picked_up' | 'delivered';
 
+/** A whole civilian group and its pickup/delivery ownership. */
 export interface CivilianGroup {
   groupId: string;
   name: string;
@@ -16,6 +22,7 @@ export interface CivilianGroup {
   deliveredToShelterId?: string;
 }
 
+/** Shelter occupancy and capacity measured in people. */
 export interface Shelter {
   shelterId: string;
   name: string;
@@ -26,6 +33,7 @@ export interface Shelter {
 
 export type AgentState = 'idle' | 'moving' | 'rescuing' | 'delivering' | 'waiting';
 
+/** A team snapshot; a nonempty passenger load remains busy until shelter delivery. */
 export interface RescueTeam {
   teamId: string;
   name: string;
@@ -47,6 +55,7 @@ export interface RescueTeam {
 
 export type CellBeliefState = 'unknown' | 'safe' | 'flooded' | 'civilian' | 'shelter';
 
+/** One cell fact with its original observation tick and observer. */
 export interface CellObservation {
   x: number;
   y: number;
@@ -58,6 +67,7 @@ export interface CellObservation {
   observerId: string;
 }
 
+/** Only knowledge available to this team, including packets actually received. */
 export interface TeamBeliefMap {
   teamId: string;
   version: number;
@@ -75,6 +85,7 @@ export interface TeamBeliefMap {
   lastUpdatedTick: number;
 }
 
+/** A versionless browser-demo reservation; the live backend uses its authoritative task ledger. */
 export interface TaskClaim {
   claimId: string;
   teamId: string;
@@ -84,6 +95,7 @@ export interface TaskClaim {
   reason?: string;
 }
 
+/** A browser-demo arbitration result for competing claims. */
 export interface TaskClaimResolution {
   civilianGroupId: string;
   winningTeamId?: string;
@@ -93,6 +105,7 @@ export interface TaskClaimResolution {
   resolvedAtTick: number;
 }
 
+/** A dashboard transport record; enqueueing a packet does not imply delivery. */
 export interface Message {
   messageId: string;
   senderId: string;
@@ -113,6 +126,22 @@ export interface Message {
 
 export type DroneStatus = 'idle' | 'flying' | 'delivering' | 'returning' | 'paused';
 
+/** Sanitized request accounting and wall-clock retry/latency values in seconds. */
+export interface AIRequestDiagnostics {
+  requests: number;
+  succeeded: number;
+  failed: number;
+  stale: number;
+  rejected: number;
+  categories: Record<string, number>;
+  lastError: string | null;
+  lastLatencySeconds: number | null;
+  retryInSeconds: number;
+  timeoutSeconds: number;
+  disabled: boolean;
+}
+
+/** Actual drone position, mission diagnostics, undelivered messages, and observed coverage. */
 export interface DroneState {
   droneId: string;
   name: string;
@@ -127,11 +156,27 @@ export interface DroneState {
   carriedMessages: Message[];
   deliveryHistoryCount: number;
   lastDeliveryTick?: number;
+  reasoning?: string;
+  aiModel?: string | null;
+  agentSystem?: {
+    mission: 'scout' | 'courier' | 'return';
+    scout: {
+      goal: [number, number] | null; status: string; coveredCells: number;
+      totalCells: number; coverageComplete: boolean;
+      decisionSource: 'claude' | 'coverage_execution'; diagnostics: AIRequestDiagnostics;
+    };
+    planner: { priorities: string[]; status: string; diagnostics: AIRequestDiagnostics };
+    courier: { targetTeam: string | null; contactRadius: number };
+    api: { requests: number; requestLimit: number | null; usage: Record<string, number> };
+    queuedTasks: string[];
+    assignments: { groupId: string; teamId: string; phase: 'pending_delivery' | 'active'; aiRanked: boolean }[];
+  };
 }
 
 export type EventSeverity = 'info' | 'warning' | 'danger' | 'success';
 export type EventCategory = 'network' | 'team' | 'drone' | 'rescue' | 'ai' | 'conflict';
 
+/** A bounded feed entry identified independently of its story timestamp. */
 export interface SimulationEvent {
   id: string;
   tick: number;
@@ -143,6 +188,7 @@ export interface SimulationEvent {
   teamId?: string;
 }
 
+/** The actual plan explanation; confidence is 0-100 and fallback is explicitly labelled. */
 export interface AIRecommendation {
   teamId: string;
   recommendedTargetId?: string;
@@ -155,6 +201,7 @@ export interface AIRecommendation {
   generatedTick: number;
 }
 
+/** Scenario metadata retained for protocol compatibility, not a rendered radio corridor. */
 export interface Neighbourhood {
   id: 'neighbourhood_alpha' | 'neighbourhood_bravo';
   name: string;
@@ -164,6 +211,7 @@ export interface Neighbourhood {
   color: string;
 }
 
+/** Authoritative terrain/flood presentation for one cell. */
 export interface WorldGridCell {
   x: number;
   y: number;
@@ -173,6 +221,7 @@ export interface WorldGridCell {
   elevation: number;
 }
 
+/** Complete admin-view snapshot; controllers still receive only sensor/report-limited facts. */
 export interface SimulationWorld {
   tick: number;
   width: number;

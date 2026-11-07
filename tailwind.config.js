@@ -1,3 +1,7 @@
+/**
+ * Scan project markup for utility classes and define the existing tactical palette and grid
+ * sizes.
+ */
 /** @type {import('tailwindcss').Config} */
 export default {
   content: [

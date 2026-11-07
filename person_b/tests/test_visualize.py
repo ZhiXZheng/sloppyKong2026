@@ -1,3 +1,4 @@
+# Regress replay exports against actual fixture movement and rescued-person counts.
 import shutil
 import subprocess
 import tempfile

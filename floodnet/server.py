@@ -2,38 +2,49 @@
 
 from __future__ import annotations
 
-import math
-import random
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
+from threading import RLock
+from contextlib import asynccontextmanager
+
+from floodnet.sim.drone_agents import DroneAgentSystem
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from floodnet.sim.pathing import Pos, chebyshev, gp, manhattan, tup
+from floodnet.sim.pathing import tup
 from floodnet.sim.runner import build_simple_agents
-from floodnet.sim.scenario import ScenarioConfig, load_scenario
-from floodnet.sim.simple_agents import SimpleDrone, SimpleTeam
+from floodnet.sim.scenario import load_scenario
 from floodnet.sim.world import World
-from schema import ActionProposal, ActionStatus, ActionType, CivilianStatus, EntityType
+from schema import ActionStatus, CivilianStatus
 
 
+# Own the in-memory dashboard simulation and serialize its agent-to-world integration.
 class SimManager:
-    def __init__(self, scenario_name: str = "small"):
+    # Keep the configured provider across resets so request accounting remains session-wide.
+    def __init__(self, scenario_name: str = "small", drone_provider=None):
+        self.drone_provider = drone_provider
         self.scenario_name = scenario_name
         self.reset(scenario_name)
 
+    # Replace the world and all mission state; invalidate old workers before accepting new
+    # actions.
     def reset(self, scenario_name: Optional[str] = None):
         if scenario_name:
             self.scenario_name = scenario_name
+        if hasattr(self, "drone_ai"):
+            self.drone_ai.close()
         self.cfg = load_scenario(self.scenario_name)
         self.world = World(self.cfg)
         self.agents = build_simple_agents(self.world)
+        self.drone_ai = DroneAgentSystem(self.cfg, provider=self.drone_provider)
+        self.drone_provider = self.drone_ai.provider
+        self._event_sequence = 0
+        self.drone_base = tup(self.cfg.drones[0].position)
         self.radio_connected: bool = True
         self.drone_status: str = "flying"
-        self.drone_payload: List[Dict[str, Any]] = []
         self.drone_relayed_count: int = 0
+        self.last_delivery_tick = None
         self.active_conflicts: int = 0
         self.resolved_conflicts: int = 0
 
@@ -48,7 +59,11 @@ class SimManager:
                 "description": f"World initialized: {len(self.world.teams)} teams, {len(self.world.civilians)} civilian groups, shelter at ({self.world.shelter.position.x},{self.world.shelter.position.y})."
             }
         ]
+        self.events.append(dict(id="ev_drone_ai_init", tick=0, timestamp=self._format_tick(0),
+            category="ai", severity="info" if self.drone_ai.provider else "warning",
+            title="Drone AI Status", description=self.drone_ai.reason))
 
+    # Convert story ticks to the dashboard clock using the scenario tick duration.
     def _format_tick(self, tick: int) -> str:
         sec = tick * self.cfg.tick_seconds
         h = 9 + (sec // 3600)
@@ -56,6 +71,7 @@ class SimManager:
         s = sec % 60
         return f"{h:02d}:{m:02d}:{s:02d}"
 
+    # Change communication availability without changing existing rescue orders.
     def set_radio(self, connected: bool):
         prev = self.radio_connected
         self.radio_connected = connected
@@ -63,6 +79,10 @@ class SimManager:
         ts = self._format_tick(tick)
 
         if prev != connected:
+            if self.drone_status == "returning":
+                self.drone_ai.return_home()
+            else:
+                self.drone_ai.invalidate()
             if connected:
                 self.events.append({
                     "id": f"ev_radio_{tick}_{len(self.events)}",
@@ -73,8 +93,6 @@ class SimManager:
                     "title": "Radio Link Restored",
                     "description": "Tactical link between West and East areas re-established. Synchronizing team knowledge."
                 })
-                # Check for claim reconciliation
-                self._reconcile_claims()
             else:
                 self.events.append({
                     "id": f"ev_radio_{tick}_{len(self.events)}",
@@ -86,168 +104,51 @@ class SimManager:
                     "description": "Teams in West and East operating independently on local beliefs. Relying on courier drone."
                 })
 
-    def _reconcile_claims(self):
-        """When reconnecting, resolve conflicting provisional claims."""
-        w_agent = self.agents.get("team-w1")
-        e_agent = self.agents.get("team-e1")
-        if not w_agent or not e_agent:
-            return
+    # Translate agent diagnostics into uniquely identified events for the existing frontend.
+    def _drain_agent_events(self):
+        for event in self.drone_ai.events:
+            self._event_sequence += 1
+            self.events.append(dict(event, id=f"ev_agent_{self._event_sequence}",
+                timestamp=self._format_tick(event["tick"])))
+        self.drone_ai.events.clear()
 
-        w_groups = set(w_agent.known_groups.keys())
-        e_groups = set(e_agent.known_groups.keys())
-        overlap = w_groups.intersection(e_groups)
-
-        for gid in overlap:
-            group = self.world.civilians.get(gid)
-            if not group or group.status == CivilianStatus.DELIVERED:
-                continue
-
-            # Deterministic resolution
-            w_pos = tup(self.world.teams["team-w1"].position)
-            e_pos = tup(self.world.teams["team-e1"].position)
-            g_pos = tup(group.position)
-
-            dist_w = manhattan(w_pos, g_pos)
-            dist_e = manhattan(e_pos, g_pos)
-
-            winner = "team-w1" if dist_w <= dist_e else "team-e1"
-            loser = "team-e1" if winner == "team-w1" else "team-w1"
-
-            self.resolved_conflicts += 1
-            self.events.append({
-                "id": f"ev_res_{self.world.tick}_{gid}",
-                "tick": self.world.tick,
-                "timestamp": self._format_tick(self.world.tick),
-                "category": "conflict",
-                "severity": "warning",
-                "title": f"Conflict Reconciled: {gid}",
-                "description": f"Both teams targeted {gid}. Assigned to {winner} (closer: {min(dist_w, dist_e)} vs {max(dist_w, dist_e)} cells). {loser} redirected."
-            })
-
+    # Sense, communicate, propose actions, validate the world transition, then publish dashboard
+    # state.
     def step(self) -> Dict[str, Any]:
         cur_tick = self.world.tick
         ts = self._format_tick(cur_tick + 1)
-
-        # 1. Sense observations
-        obs_by_agent = self.world.observe_all()
-
-        # If radio connected, share observations across areas
-        if self.radio_connected:
-            all_flood_cells = set()
-            all_groups = {}
-            for aid, obs_list in obs_by_agent.items():
-                for o in obs_list:
-                    if o.entity.entity_type == EntityType.FLOOD_CELL:
-                        all_flood_cells.add(tup(o.position))
-                    elif o.entity.entity_type == EntityType.CIVILIAN_GROUP:
-                        all_groups[o.entity.entity_id] = (
-                            tup(o.position), o.observed_status, o.details.get("size", 1)
-                        )
-
-            for aid in self.world.teams:
-                agent = self.agents[aid]
-                agent.known_flooded.update(all_flood_cells)
-                agent.known_groups.update(all_groups)
-
-        # 2. Drone physical transport & store-and-forward relay
-        drone = self.world.drones.get("drone-1")
-        if drone and drone.enabled:
-            d_pos = tup(drone.position)
-            w_agent = self.agents.get("team-w1")
-            e_agent = self.agents.get("team-e1")
-
-            # Arriving near West depot (5, 10)
-            if d_pos[0] <= 6 and d_pos[1] <= 11 and w_agent:
-                # Deliver East packets to West
-                east_packets = [p for p in self.drone_payload if p.get("origin") == "east"]
-                if east_packets:
-                    for pkt in east_packets:
-                        w_agent.known_flooded.update(pkt.get("flooded", []))
-                        w_agent.known_groups.update(pkt.get("groups", {}))
-                    self.drone_payload = [p for p in self.drone_payload if p.get("origin") != "east"]
-                    self.drone_relayed_count += len(east_packets)
-                    self.events.append({
-                        "id": f"ev_drone_del_w_{cur_tick}",
-                        "tick": cur_tick,
-                        "timestamp": ts,
-                        "category": "drone",
-                        "severity": "success",
-                        "title": "Drone Delivered Packets to West Sector",
-                        "description": f"CR-1 unloaded {len(east_packets)} observation packets. West belief map updated with eastern intelligence."
-                    })
-
-                # Pick up West packets for East
-                if not self.radio_connected and w_agent.known_groups:
-                    if not any(p.get("origin") == "west" for p in self.drone_payload):
-                        self.drone_payload.append({
-                            "origin": "west",
-                            "destination": "east",
-                            "flooded": list(w_agent.known_flooded),
-                            "groups": dict(w_agent.known_groups),
-                            "tick": cur_tick
-                        })
-                        self.events.append({
-                            "id": f"ev_drone_load_w_{cur_tick}",
-                            "tick": cur_tick,
-                            "timestamp": ts,
-                            "category": "drone",
-                            "severity": "info",
-                            "title": "Drone Collected West Observations",
-                            "description": f"CR-1 loaded status reports for transit across partition corridor."
-                        })
-
-            # Arriving near East depot (15, 10)
-            elif d_pos[0] >= 14 and d_pos[1] <= 11 and e_agent:
-                # Deliver West packets to East
-                west_packets = [p for p in self.drone_payload if p.get("origin") == "west"]
-                if west_packets:
-                    for pkt in west_packets:
-                        e_agent.known_flooded.update(pkt.get("flooded", []))
-                        e_agent.known_groups.update(pkt.get("groups", {}))
-                    self.drone_payload = [p for p in self.drone_payload if p.get("origin") != "west"]
-                    self.drone_relayed_count += len(west_packets)
-                    self.events.append({
-                        "id": f"ev_drone_del_e_{cur_tick}",
-                        "tick": cur_tick,
-                        "timestamp": ts,
-                        "category": "drone",
-                        "severity": "success",
-                        "title": "Drone Delivered Packets to East Sector",
-                        "description": f"CR-1 delivered {len(west_packets)} packets across partition. East belief map updated."
-                    })
-
-                # Pick up East packets for West
-                if not self.radio_connected and e_agent.known_groups:
-                    if not any(p.get("origin") == "east" for p in self.drone_payload):
-                        self.drone_payload.append({
-                            "origin": "east",
-                            "destination": "west",
-                            "flooded": list(e_agent.known_flooded),
-                            "groups": dict(e_agent.known_groups),
-                            "tick": cur_tick
-                        })
-                        self.events.append({
-                            "id": f"ev_drone_load_e_{cur_tick}",
-                            "tick": cur_tick,
-                            "timestamp": ts,
-                            "category": "drone",
-                            "severity": "info",
-                            "title": "Drone Collected East Observations",
-                            "description": f"CR-1 loaded reports from East sector."
-                        })
-
-        # 3. Agent proposals
-        proposals = []
-        for aid in self.world.agent_ids():
-            if aid in self.world.teams:
-                p = self.agents[aid].decide(cur_tick, self.world.team_state(aid), obs_by_agent[aid])
-                proposals.append(p)
-            else:
-                p = self.agents[aid].decide(cur_tick, self.world.agent_pos(aid))
-                proposals.append(p)
+        observations = self.world.observe_all()
+        self.drone_ai.sense(self.world, self.agents, observations, self.radio_connected)
+        drone = self.world.drones["drone-1"]
+        # Deliver/reserve plans before teams decide, so a received order can be
+        # acted upon in the same tick. Only the coordinator owns flight commands.
+        proposals = [self.drone_ai.drone_action(self.world, self.agents, self.radio_connected)]
+        proposals.extend(self.drone_ai.team_action(self.world, tid, self.agents[tid], radio=self.radio_connected)
+                         for tid in sorted(self.world.teams))
+        self._drain_agent_events()
 
         # 4. Step world
         outcome = self.world.step(proposals)
+        self.drone_ai.apply_results(self.world, proposals, outcome)
+        self.drone_relayed_count = self.drone_ai.delivered_count
+        self.last_delivery_tick = self.drone_ai.last_delivery_tick
+        if drone and not drone.enabled and self.drone_status == "returning":
+            self.drone_status = "idle"
+
+        # A stationary team can be overtaken by rising water. Report that
+        # explicitly; its next decision seeks adjacent dry ground.
+        for team_id, team in self.world.teams.items():
+            if tup(team.position) in outcome.newly_flooded:
+                self.events.append(dict(id=f"ev_team_flood_{cur_tick}_{team_id}",
+                    tick=cur_tick + 1, timestamp=ts, category="team", severity="danger",
+                    title=f"Rising Water Reached {team_id}",
+                    description="Team position flooded while occupied. Seeking adjacent dry ground; will hold if surrounded."))
+        for result in outcome.results:
+            if (result.status == ActionStatus.REJECTED and result.team_id in self.world.teams
+                    and result.message and ("flood" in result.message or "dry route" in result.message)):
+                self.events.append(dict(id=f"ev_water_block_{cur_tick}_{result.team_id}",
+                    tick=cur_tick + 1, timestamp=ts, category="team", severity="warning",
+                    title=f"Unsafe Move Blocked: {result.team_id}", description=result.message))
 
         # 5. Process outcome into tactical events
         for u in outcome.status_updates:
@@ -286,20 +187,7 @@ class SimManager:
                     "description": f"Flood water engulfed {u.civilian_group_id} before rescue units arrived."
                 })
 
-        # Check for active border conflict during disconnection
-        if not self.radio_connected:
-            w_agent = self.agents.get("team-w1")
-            e_agent = self.agents.get("team-e1")
-            if w_agent and e_agent:
-                border_gid = "group-7"
-                if border_gid in w_agent.known_groups and border_gid in e_agent.known_groups:
-                    group = self.world.civilians.get(border_gid)
-                    if group and group.status == CivilianStatus.AVAILABLE:
-                        self.active_conflicts = 1
-                    else:
-                        self.active_conflicts = 0
-        else:
-            self.active_conflicts = 0
+        self.active_conflicts = 0  # A single ownership ledger prevents duplicate assignments.
 
         # Keep event log capped at 70
         self.events = self.events[-70:]
@@ -338,6 +226,7 @@ class SimManager:
         team_alpha = self.world.teams.get("team-w1") or list(self.world.teams.values())[0]
         team_bravo = self.world.teams.get("team-e1") or list(self.world.teams.values())[-1]
 
+        # Adapt authoritative positions and local orders to the unchanged team-panel contract.
         def format_team(t, callsign, color):
             return {
                 "teamId": t.team_id,
@@ -346,14 +235,17 @@ class SimManager:
                 "color": color,
                 "position": {"x": t.position.x, "y": t.position.y},
                 "direction": "N",
-                "state": "delivering" if t.carried_group_ids else "moving",
+                "state": ("waiting" if tup(t.position) in self.world.flooded else
+                    "delivering" if t.carried_group_ids else
+                    "moving" if self.drone_ai.orders[t.team_id] or (not self.radio_connected and t.team_id in self.drone_ai.wandering) else "idle"),
+                "currentTargetId": self.world.shelter.shelter_id if t.carried_civilians else self.drone_ai.orders[t.team_id],
                 "capacity": t.capacity,
                 "carriedCivilians": t.carried_civilians,
                 "carriedGroupIds": list(t.carried_group_ids),
                 "neighbourhoodId": "neighbourhood_alpha" if t.neighbourhood_id == "west" else "neighbourhood_bravo",
-                "plannedRoute": [],
-                "completedRoute": [{"x": t.position.x, "y": t.position.y}],
-                "lastCommTick": tick,
+                "plannedRoute": [{"x": x, "y": y} for x, y in self.drone_ai.routes[t.team_id]],
+                "completedRoute": [{"x": x, "y": y} for x, y in self.drone_ai.history[t.team_id]],
+                "lastCommTick": self.drone_ai.teams[t.team_id]["reported_tick"],
                 "pendingOutgoingMessages": []
             }
 
@@ -386,31 +278,22 @@ class SimManager:
             "enabled": drone_obj.enabled if drone_obj else True,
             "speed": self.cfg.drone_speed,
             "currentLegIndex": 0,
-            "routeWaypoints": [
-                {"x": 5, "y": 10},
-                {"x": 8, "y": 10},
-                {"x": 12, "y": 10},
-                {"x": 15, "y": 10},
-                {"x": 12, "y": 10},
-                {"x": 8, "y": 10}
-            ],
-            "destinationNeighbourhood": "neighbourhood_bravo" if (drone_obj and drone_obj.position.x < 10) else "neighbourhood_alpha",
-            "carriedMessages": [
-                {
-                    "messageId": f"pkt_{i}",
-                    "senderId": p.get("origin", "west"),
-                    "originNeighbourhood": p.get("origin", "west"),
-                    "destinationNeighbourhood": p.get("destination", "east"),
-                    "type": "observation",
-                    "createdTick": p.get("tick", 0),
-                    "data": {}
-                }
-                for i, p in enumerate(self.drone_payload)
-            ],
+            "routeWaypoints": ([{"x": drone_obj.position.x, "y": drone_obj.position.y},
+                {"x": self.drone_ai.flight_goal[0], "y": self.drone_ai.flight_goal[1]}]
+                if drone_obj and self.drone_ai.flight_goal else []),
+            "destinationNeighbourhood": ("neighbourhood_alpha" if
+                (self.drone_ai.flight_goal[0] if self.drone_ai.flight_goal else drone_obj.position.x)
+                < self.cfg.area_split_x else "neighbourhood_bravo"),
+            "reasoning": self.drone_ai.reason,
+            "aiModel": self.drone_ai.provider.model if self.drone_ai.provider else None,
+            "agentSystem": self.drone_ai.state(),
+            "carriedMessages": self.drone_ai.pending_messages(),
+            "lastDeliveryTick": self.last_delivery_tick,
             "deliveryHistoryCount": self.drone_relayed_count
         }
 
         # Belief maps mapping
+        # Render only this team's received knowledge, including original observation ticks.
         def format_belief(agent_id):
             agent = self.agents.get(agent_id)
             grid = {}
@@ -446,7 +329,7 @@ class SimManager:
                         "position": {"x": gpos[0], "y": gpos[1]},
                         "size": size,
                         "status": status,
-                        "observedTick": tick,
+                        "observedTick": agent.known_group_versions.get(gid, (tick, 0))[0],
                         "observerId": agent_id
                     }
 
@@ -464,51 +347,10 @@ class SimManager:
             "bravo": format_belief("team-e1")
         }
 
-        # AI Recommendations
-        def make_rec(agent_id, team_obj):
-            agent = self.agents.get(agent_id)
-            if team_obj.carried_group_ids:
-                return {
-                    "teamId": agent_id,
-                    "recommendedTargetId": self.world.shelter.shelter_id,
-                    "targetDescription": self.world.shelter.shelter_id,
-                    "recommendedAction": f"Transit Evacuees to Shelter ({self.world.shelter.position.x},{self.world.shelter.position.y})",
-                    "reasoning": f"Carrying {team_obj.carried_civilians} people from {','.join(team_obj.carried_group_ids)}. Proceeding to safe drop-off.",
-                    "confidence": 98 if self.radio_connected else 88,
-                    "missingInformation": "All routes clear on southern ridge." if self.radio_connected else "Operating on local memory.",
-                    "isAiFallback": not self.radio_connected,
-                    "generatedTick": tick
-                }
-            if agent and agent.known_groups:
-                avail = [gid for gid, (_, st, _) in agent.known_groups.items() if st in ("available", "reported")]
-                if avail:
-                    target_id = avail[0]
-                    return {
-                        "teamId": agent_id,
-                        "recommendedTargetId": target_id,
-                        "targetDescription": f"Target: {target_id}",
-                        "recommendedAction": f"Deploy to rescue {target_id}",
-                        "reasoning": f"Nearest observed group in local operational area.",
-                        "confidence": 92 if self.radio_connected else 74,
-                        "missingInformation": "Local radar sweep verified." if self.radio_connected else "Cross-partition water telemetry unknown.",
-                        "isAiFallback": not self.radio_connected,
-                        "generatedTick": tick
-                    }
-            return {
-                "teamId": agent_id,
-                "recommendedTargetId": None,
-                "targetDescription": "Patrol & Sense",
-                "recommendedAction": "Advance Patrol Route",
-                "reasoning": "No reachable civilian groups in local memory. Patrolling sector.",
-                "confidence": 85 if self.radio_connected else 68,
-                "missingInformation": "Awaiting observations or drone updates.",
-                "isAiFallback": not self.radio_connected,
-                "generatedTick": tick
-            }
-
+        # The existing panels now show actual assigned plans, not synthetic AI text.
         recommendations_dict = {
-            "alpha": make_rec("team-w1", team_alpha),
-            "bravo": make_rec("team-e1", team_bravo)
+            "alpha": self.drone_ai.recommendation(team_alpha.team_id, team_alpha, tick),
+            "bravo": self.drone_ai.recommendation(team_bravo.team_id, team_bravo, tick)
         }
 
         return {
@@ -561,7 +403,15 @@ class SimManager:
 
 
 # FastAPI Application instance
-app = FastAPI(title="FloodNet Python Simulation Engine", version="2.0")
+# Release the background agent executor when the development server shuts down.
+@asynccontextmanager
+async def lifespan(app):
+    yield
+    manager.drone_ai.close()
+
+
+state_lock = RLock()
+app = FastAPI(lifespan=lifespan, title="FloodNet Python Simulation Engine", version="2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -574,51 +424,74 @@ app.add_middleware(
 manager = SimManager(scenario_name="small")
 
 
+# Read a consistent snapshot without advancing either agents or flood simulation.
 @app.get("/api/state")
 def get_state():
-    return manager.get_state()
+    with state_lock:
+        return manager.get_state()
 
 
+# Apply one authoritative tick while preventing concurrent requests from interleaving mutations.
 @app.post("/api/step")
 def step_sim():
-    return manager.step()
+    with state_lock:
+        return manager.step()
 
 
+# Validate the requested scenario name before rebuilding simulation state.
 class ResetRequest(BaseModel):
     scenario: str = "small"
 
 
+# Reject unsupported scenarios and return the newly initialized dashboard snapshot.
 @app.post("/api/reset")
 def reset_sim(req: ResetRequest):
-    manager.reset(req.scenario)
-    return manager.get_state()
+    if req.scenario not in ("small", "default"):
+        raise HTTPException(400, "Unknown scenario")
+    with state_lock:
+        manager.reset(req.scenario)
+        return manager.get_state()
 
 
+# Carry the operator's requested radio connectivity state.
 class RadioRequest(BaseModel):
     connected: bool
 
 
+# Apply the radio switch under the same lock used by simulation ticks.
 @app.post("/api/radio")
 def toggle_radio(req: RadioRequest):
-    manager.set_radio(req.connected)
-    return manager.get_state()
+    with state_lock:
+        manager.set_radio(req.connected)
+        return manager.get_state()
 
 
+# Restrict operator commands to launch, pause, or return.
 class DroneRequest(BaseModel):
-    action: str  # "launch", "pause", "return"
+    action: Literal["launch", "pause", "return"]
 
 
+# Invalidate pending flight decisions and apply the operator command without rewriting team
+# orders.
 @app.post("/api/drone")
 def control_drone(req: DroneRequest):
-    if req.action == "launch":
-        manager.drone_status = "flying"
-        if "drone-1" in manager.world.drones:
-            manager.world.drones["drone-1"].enabled = True
-    elif req.action == "pause":
-        manager.drone_status = "paused"
-        if "drone-1" in manager.world.drones:
-            manager.world.drones["drone-1"].enabled = False
-    return manager.get_state()
+    with state_lock:
+        drone = manager.world.drones.get("drone-1")
+        if not drone:
+            raise HTTPException(404, "Drone not found")
+        manager.drone_ai.invalidate()
+        if req.action == "launch":
+            manager.drone_ai.launch()
+            manager.drone_status = "flying"
+            drone.enabled = True
+        elif req.action == "pause":
+            manager.drone_status = "paused"
+            drone.enabled = False
+        else:
+            manager.drone_status = "returning"
+            drone.enabled = True
+            manager.drone_ai.return_home()
+        return manager.get_state()
 
 
 if __name__ == "__main__":

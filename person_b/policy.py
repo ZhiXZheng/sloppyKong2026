@@ -5,6 +5,7 @@ from collections import deque
 from schema import CivilianStatus, EntityType, GridPosition
 
 
+# Find a cardinal path using observed obstacles and the configured policy for unknown cells.
 def route(store, start, goal, unknown_traversable=True):
     start, goal = (start.x, start.y), (goal.x, goal.y)
     blocked, known = set(), {start}
@@ -35,6 +36,7 @@ def route(store, start, goal, unknown_traversable=True):
     return None
 
 
+# Filter local groups by whole-group capacity, lifecycle, ownership, and route reachability.
 def candidates(store, state, excluded=(), unknown_traversable=True):
     choices = {}
     for o in store.observations(EntityType.CIVILIAN_GROUP):
@@ -56,12 +58,15 @@ def candidates(store, state, excluded=(), unknown_traversable=True):
     return choices
 
 
+# Keep a still-valid current task; otherwise choose the nearest local candidate with a stable tie-
+# break.
 def select_target(choices, current=None):
     if current in choices:
         return current
     return min(choices, key=lambda group: (len(choices[group][1]), group), default=None)
 
 
+# Choose a known reachable shelter with enough room for all currently carried people.
 def shelter_route(store, state, unknown_traversable=True):
     choices = []
     for o in store.observations(EntityType.SHELTER):

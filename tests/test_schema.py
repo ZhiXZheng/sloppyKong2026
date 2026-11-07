@@ -1,3 +1,4 @@
+# Regress protocol compatibility, validation, provenance, and serialization boundaries.
 import json
 import unittest
 from datetime import datetime, timezone

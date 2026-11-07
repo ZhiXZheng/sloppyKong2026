@@ -1,3 +1,7 @@
+/**
+ * Browser demo radio exchange and queued courier packets; transport delivery remains separate
+ * from world mutation.
+ */
 import {
   CellObservation,
   CivilianGroup,

@@ -1,3 +1,7 @@
+/**
+ * Construct the browser-only starting scenario and isolated local belief maps when the Python
+ * backend is unavailable.
+ */
 import {
   CivilianGroup,
   DroneState,
@@ -275,6 +279,7 @@ export function createInitialScenario(): SimulationWorld {
   };
 }
 
+/** Seed one team's browser-demo observations without sharing another team's private grid. */
 function createInitialBeliefMap(
   teamId: string,
   startPos: GridPosition,

@@ -15,6 +15,8 @@ SYSTEM_PROMPT = (
 )
 
 
+# Serialize only team-local, deterministically ordered context so equivalent requests share a
+# cache key.
 def canonical_prompt(request, state, eligible, model, max_tokens):
     observations = []
     for o in sorted(request.beliefs.observations,
@@ -35,7 +37,9 @@ def canonical_prompt(request, state, eligible, model, max_tokens):
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+# Store bounded validated decisions in SQLite, optionally persisting them across runs.
 class DecisionCache:
+    # Create an in-memory or file-backed cache guarded for shared worker access.
     def __init__(self, path=None, max_entries=512):
         if max_entries < 1:
             raise ValueError("max_entries must be positive")
@@ -45,16 +49,19 @@ class DecisionCache:
         self.connection.execute("CREATE TABLE IF NOT EXISTS decisions (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self.connection.commit()
 
+    # Include the scenario seed and exact canonical prompt in a stable content hash.
     @staticmethod
     def key(seed, prompt):
         return hashlib.sha256(f"{seed}\n{prompt}".encode()).hexdigest()
 
+    # Read a matching cached decision under the SQLite connection lock.
     def get(self, seed, prompt):
         with self.lock:
             row = self.connection.execute("SELECT value FROM decisions WHERE key=?",
                                           (self.key(seed, prompt),)).fetchone()
         return json.loads(row[0]) if row else None
 
+    # Insert validated content and evict excess entries to keep local storage bounded.
     def put(self, seed, prompt, content):
         with self.lock, self.connection:
             self.connection.execute("INSERT OR REPLACE INTO decisions VALUES (?, ?)",
@@ -63,6 +70,7 @@ class DecisionCache:
                                     "(SELECT rowid FROM decisions ORDER BY rowid DESC LIMIT ?)",
                                     (self.max_entries,))
 
+    # Release the SQLite connection after worker use ends.
     def close(self):
         with self.lock:
             self.connection.close()

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from floodnet.sim.pathing import Pos, chebyshev, gp, manhattan, tup
+from floodnet.sim.pathing import Pos, bfs_path, chebyshev, gp, manhattan, tup
 from floodnet.sim.scenario import ScenarioConfig, compute_flood_ticks
 from schema import (
     ActionProposal,
@@ -42,6 +42,7 @@ TERMINAL = (CivilianStatus.DELIVERED, CivilianStatus.LOST)
 FLOOD_ACTOR = "simulation"  # changed_by_team_id when the flood (not a team) changes a group
 
 
+# Collect authoritative results, lifecycle changes, and flood expansion from one tick.
 @dataclass
 class StepOutcome:
     results: list[ActionResult] = field(default_factory=list)
@@ -50,7 +51,11 @@ class StepOutcome:
     newly_flooded: list[Pos] = field(default_factory=list)
 
 
+# Own ground truth; all agent proposals pass validation here before any positions or rescue counts
+# change.
 class World:
+    # Copy the scenario, seed deterministic IDs, compute flood arrivals, and reject invalid
+    # starting positions.
     def __init__(self, cfg: ScenarioConfig):
         self.cfg = cfg
         self.width = cfg.width
@@ -81,16 +86,20 @@ class World:
                 raise ValueError(f"team {t.team_id} starts in water")
 
     # ---------- deterministic ids/time ----------
+    # Use simulation time instead of wall time for reproducible protocol timestamps.
     def now(self) -> datetime:
         return self.cfg.start_time + timedelta(seconds=self.tick * self.cfg.tick_seconds)
 
+    # Generate deterministic protocol IDs from this world's seeded random stream.
     def new_uuid(self) -> uuid.UUID:
         return uuid.UUID(int=self._rng.getrandbits(128), version=4)
 
     # ---------- queries ----------
+    # Check the scenario bounds before accepting a sensed or proposed position.
     def in_bounds(self, pos: Pos) -> bool:
         return 0 <= pos[0] < self.width and 0 <= pos[1] < self.height
 
+    # Query current authoritative water without predicting future agent knowledge.
     def is_flooded(self, pos: Pos) -> bool:
         return pos in self.flooded
 
@@ -98,26 +107,32 @@ class World:
         """neighbourhood_id of a cell."""
         return "west" if pos[0] < self.cfg.area_split_x else "east"
 
+    # Use stable agent ordering for reproducible action application and sensing.
     def agent_ids(self) -> list[str]:
         return sorted(self.teams) + sorted(self.drones)
 
+    # Read an authoritative team or drone position for simulation-side validation.
     def agent_pos(self, agent_id: str) -> Pos:
         if agent_id in self.teams:
             return tup(self.teams[agent_id].position)
         return tup(self.drones[agent_id].position)
 
+    # Return a defensive copy so controllers cannot mutate world truth directly.
     def team_state(self, team_id: str) -> RescueTeamState:
         return self.teams[team_id].model_copy(deep=True)
 
+    # Return a defensive copy of the drone's authoritative state.
     def drone_state(self, drone_id: str) -> DroneState:
         return self.drones[drone_id].model_copy(deep=True)
 
+    # Recognize terminal civilian lifecycles or the configured scenario tick limit.
     def is_done(self) -> bool:
         if self.tick >= self.cfg.max_ticks:
             return True
         return all(c.status in TERMINAL for c in self.civilians.values())
 
     # ---------- sensing ----------
+    # Attach original source tick, entity revision, and deterministic identity to one sensed fact.
     def _observation(self, observer: str, etype: EntityType, eid: str, pos: Pos,
                      status: str | None, revision: int, details: dict[str, Any] | None = None
                      ) -> Observation:
@@ -173,6 +188,8 @@ class World:
                     ))
         return out
 
+    # Produce separate sensor-limited inputs; recipients still cannot see another agent's
+    # observations automatically.
     def observe_all(self) -> dict[str, list[Observation]]:
         return {aid: self.observe(aid) for aid in self.agent_ids()}
 
@@ -196,6 +213,7 @@ class World:
         self.log.append(outcome)
         return outcome
 
+    # Acknowledge an action using the position and lifecycle state actually applied by the world.
     def _result(self, p: ActionProposal, status: ActionStatus, message: str | None = None,
                 entity: str | None = None) -> ActionResult:
         return ActionResult(
@@ -209,9 +227,12 @@ class World:
             message=message,
         )
 
+    # Reject a proposal with an operational reason while leaving world state unchanged.
     def _reject(self, p: ActionProposal, why: str) -> ActionResult:
         return self._result(p, ActionStatus.REJECTED, why, p.target_entity_id)
 
+    # Route one proposal to team or drone validation; world mutation never comes directly from
+    # Claude.
     def _apply(self, p: ActionProposal, outcome: StepOutcome) -> ActionResult:
         if p.team_id in self.drones:
             return self._apply_drone(p)
@@ -225,6 +246,8 @@ class World:
             return self._pickup(p, outcome)
         return self._dropoff(p, outcome)
 
+    # Permit bounded flight over water, but prohibit disabled movement and rescue actions by
+    # drones.
     def _apply_drone(self, p: ActionProposal) -> ActionResult:
         drone = self.drones[p.team_id]
         if p.action_type == ActionType.WAIT:
@@ -241,6 +264,7 @@ class World:
         drone.position = gp(to)
         return self._result(p, ActionStatus.COMPLETED)
 
+    # Require a dry in-range crossing that remains dry when this tick's flood advance occurs.
     def _move_team(self, p: ActionProposal) -> ActionResult:
         team = self.teams[p.team_id]
         to = tup(p.target_position)
@@ -250,6 +274,17 @@ class World:
             return self._reject(p, f"move too far {tup(team.position)}->{to}")
         if to in self.flooded:
             return self._reject(p, f"cannot enter flooded cell {to}")
+        if self.flood_ticks.get(to, float("inf")) <= self.tick + 1:
+            return self._reject(p, f"cannot enter cell flooding on arrival {to}")
+        # Validate the whole crossing when a scenario permits multi-cell moves.
+        # bfs_path allows its goal, already checked above, but every intermediate
+        # cell must remain dry through this tick's flood advance.
+        path = bfs_path(tup(team.position), to,
+            lambda cell: cell not in self.flooded and
+                self.flood_ticks.get(cell, float("inf")) > self.tick + 1,
+            self.width, self.height)
+        if path is None or len(path) > self.cfg.team_speed:
+            return self._reject(p, "no dry route within movement range")
         team.position = gp(to)
         for gid in team.carried_group_ids:
             self.civilians[gid].position = gp(to)
@@ -260,6 +295,8 @@ class World:
         data = self.teams[team_id].model_dump() | changes
         self.teams[team_id] = RescueTeamState.model_validate(data)
 
+    # Advance a civilian lifecycle and source revision together, then emit the corresponding
+    # status update.
     def _set_group_status(self, outcome: StepOutcome, group: CivilianGroup,
                           status: CivilianStatus, team_id: str) -> None:
         group.status = status
@@ -275,6 +312,8 @@ class World:
             changed_at=self.now(),
         ))
 
+    # Enforce adjacency, remaining capacity, and exclusive pickup before transferring a whole
+    # group.
     def _pickup(self, p: ActionProposal, outcome: StepOutcome) -> ActionResult:
         team = self.teams[p.team_id]
         group = self.civilians.get(p.target_entity_id)
@@ -294,6 +333,7 @@ class World:
         self._set_group_status(outcome, group, CivilianStatus.PICKED_UP, team.team_id)
         return self._result(p, ActionStatus.COMPLETED, entity=group.group_id)
 
+    # Only delivery at shelter counts as rescued; update people, groups, and team load atomically.
     def _dropoff(self, p: ActionProposal, outcome: StepOutcome) -> ActionResult:
         team = self.teams[p.team_id]
         if p.target_entity_id != self.shelter.shelter_id:
@@ -315,6 +355,7 @@ class World:
         self._update_team(team.team_id, carried_group_ids=[], carried_civilians=0)
         return self._result(p, ActionStatus.COMPLETED, entity=self.shelter.shelter_id)
 
+    # Advance story time, flood scheduled cells, and mark exposed waiting civilians lost.
     def _advance_flood(self, outcome: StepOutcome) -> None:
         self.tick += 1
         newly = sorted(p for p, t in self.flood_ticks.items() if t == self.tick)
@@ -332,6 +373,8 @@ class World:
             d.world_tick = self.tick
 
     # ---------- outputs ----------
+    # Count people from authoritative terminal statuses rather than from potentially duplicated
+    # messages.
     def score(self) -> dict[str, int]:
         cs = self.civilians
         rescued = [c for c in cs.values() if c.status == CivilianStatus.DELIVERED]
@@ -345,6 +388,8 @@ class World:
             "people_lost": sum(c.size for c in lost),
         }
 
+    # Publish the current flood snapshot without transferring it automatically into every agent's
+    # memory.
     def flood_update(self) -> FloodUpdate:
         return FloodUpdate(world_tick=self.tick, revision=self.tick,
                            flood_cells=[gp(p) for p in sorted(self.flooded)])

@@ -1,3 +1,7 @@
+/**
+ * Present one team's actual load, local knowledge, and delivered plan; distinguish AI advice
+ * from standing-policy fallback.
+ */
 import React from 'react';
 import { RescueTeam, TeamBeliefMap, AIRecommendation } from '../types/simulation';
 import { BeliefMap } from './BeliefMap';
@@ -21,6 +25,7 @@ interface TeamPanelProps {
   onSelectTeam?: () => void;
 }
 
+/** Show only the supplied team, its local belief map, and its current recommendation. */
 export const TeamPanel: React.FC<TeamPanelProps> = ({
   team,
   belief,

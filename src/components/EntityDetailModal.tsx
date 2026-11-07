@@ -1,3 +1,7 @@
+/**
+ * Inspect the currently selected entity from the shared snapshot; selection never changes rescue
+ * ownership.
+ */
 import React from 'react';
 import { useSimulationStore } from '../store/simulationStore';
 import {
@@ -12,6 +16,7 @@ import {
   ArrowRight
 } from 'lucide-react';
 
+/** Resolve a selected ID against the current snapshot and display its operational details. */
 export const EntityDetailModal: React.FC = () => {
   const { world, selectedEntity, selectEntity } = useSimulationStore();
 

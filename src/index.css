@@ -1,3 +1,4 @@
+/* Shared dashboard theme, utility layers, and purely visual animation helpers. */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

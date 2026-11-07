@@ -1,3 +1,6 @@
+/**
+ * Filter and render the bounded operational event stream without affecting simulation state.
+ */
 import React, { useEffect, useRef, useState } from 'react';
 import { useSimulationStore } from '../store/simulationStore';
 import {
@@ -17,6 +20,7 @@ import {
   Terminal
 } from 'lucide-react';
 
+/** Keep event filtering and scroll presentation local to this component. */
 export const EventFeed: React.FC = () => {
   const { world } = useSimulationStore();
   const events = world.events;
@@ -32,6 +36,7 @@ export const EventFeed: React.FC = () => {
     ? events
     : events.filter(e => e.category === filterCategory);
 
+  /** Use a stable icon for each operational event category. */
   const getCategoryIcon = (category: EventCategory) => {
     switch (category) {
       case 'network':
@@ -49,6 +54,7 @@ export const EventFeed: React.FC = () => {
     }
   };
 
+  /** Map event severity to existing presentation styles. */
   const getSeverityStyle = (severity: EventSeverity) => {
     switch (severity) {
       case 'danger':

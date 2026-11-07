@@ -7,12 +7,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from schema import EntityType, SituationBrief
 
 
+# Validate optional AI summary text separately from operational rescue decisions.
 class BriefContent(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     summary: str = Field(min_length=1, max_length=2000)
     warnings: list[str]
 
 
+# Summarize only the supplied snapshot and explicitly report stale or missing information.
 def local_brief(snapshot, timestamp, stale_after=5):
     stale = [f"{o.entity.entity_id}: {snapshot.world_tick - o.observed_tick} ticks old"
              for o in snapshot.observations if snapshot.world_tick - o.observed_tick > stale_after]
@@ -30,11 +32,13 @@ def local_brief(snapshot, timestamp, stale_after=5):
 class BriefingService:
     """One optional background summary at a time, with a rules-based fallback."""
 
+    # Allow one optional background briefing without changing the belief store.
     def __init__(self, provider=None):
         self.provider = provider
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="floodnet-brief")
         self.future = None
 
+    # Copy the snapshot and prepare a deterministic fallback before optional model summarization.
     def submit(self, snapshot, timestamp, ai_available=False):
         if self.future is not None and not self.future.done():
             return False
@@ -43,6 +47,7 @@ class BriefingService:
         self.future = self.pool.submit(self._build, fallback, snapshot, ai_available)
         return True
 
+    # Use AI only when available; retain the local summary on any provider or validation failure.
     def _build(self, fallback, snapshot, available):
         if not self.provider or not available:
             return fallback
@@ -63,11 +68,13 @@ class BriefingService:
         except Exception:
             return fallback
 
+    # Return a finished briefing without blocking a simulation tick.
     def poll(self):
         if self.future is None or not self.future.done():
             return None
         result, self.future = self.future.result(), None
         return result
 
+    # Shut down the optional summary worker without waiting on network completion.
     def close(self):
         self.pool.shutdown(wait=False, cancel_futures=True)

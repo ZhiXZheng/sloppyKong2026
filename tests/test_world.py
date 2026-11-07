@@ -1,3 +1,4 @@
+# Regress authoritative flood timing, dry movement, whole-group rescue lifecycles, and deterministic outcomes.
 import pytest
 
 from floodnet.sim.pathing import gp, tup
@@ -169,3 +170,42 @@ def test_full_run_terminates():
     assert w.is_done()
     s = w.score()
     assert s["groups_rescued"] + s["groups_lost"] <= s["groups_total"]
+
+def test_team_cannot_enter_cell_flooding_on_arrival(world):
+    world.flood_ticks[(3, 16)] = 1
+    result = world.step([move('team-w1', (3, 16))]).results[0]
+    assert result.status == ActionStatus.REJECTED
+    assert 'flooding on arrival' in result.message
+    assert tup(world.teams['team-w1'].position) == (3, 17)
+    assert (3, 16) in world.flooded
+
+
+def test_team_cannot_jump_over_water_at_higher_speed(world):
+    world.cfg.team_speed = 2
+    world.flooded.add((3, 16))
+    result = world.step([move('team-w1', (3, 15))]).results[0]
+    assert result.status == ActionStatus.REJECTED
+    assert tup(world.teams['team-w1'].position) == (3, 17)
+
+
+def test_team_overtaken_by_water_escapes_to_dry_neighbour(world):
+    from floodnet.sim.runner import build_simple_agents
+    agent = build_simple_agents(world)['team-w1']
+    world.flood_ticks[(3, 17)] = 1
+    world.step([])
+    assert tup(world.teams['team-w1'].position) in world.flooded
+    action = agent.decide(world.tick, world.team_state('team-w1'), world.observe('team-w1'))
+    assert tup(action.target_position) not in world.flooded
+    assert 'Evacuating' in action.explanation
+    result = world.step([action]).results[0]
+    assert result.status == ActionStatus.COMPLETED
+    assert tup(world.teams['team-w1'].position) not in world.flooded
+
+
+def test_team_surrounded_by_water_stays_put(world):
+    from floodnet.sim.runner import build_simple_agents
+    agent = build_simple_agents(world)['team-w1']
+    world.flooded.update({(3, 17), (3, 16), (4, 17), (3, 18), (2, 17)})
+    action = agent.decide(world.tick, world.team_state('team-w1'), world.observe('team-w1'))
+    assert action.action_type.value == 'wait'
+    assert 'Stranded' in action.explanation

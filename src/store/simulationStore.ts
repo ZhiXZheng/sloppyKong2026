@@ -1,3 +1,7 @@
+/**
+ * Central dashboard state and operator actions. Python owns live simulation truth; failed live
+ * steps pause playback rather than inventing local progress.
+ */
 import { create } from 'zustand';
 import { SimulationWorld } from '../types/simulation';
 import { createInitialScenario } from '../simulation/scenario';
@@ -19,7 +23,6 @@ interface SelectedEntity {
 
 interface Overlays {
   flood: boolean;
-  coverage: boolean;
   routes: boolean;
   civilians: boolean;
 }
@@ -43,11 +46,13 @@ interface SimulationStore {
   toggleRadio: () => Promise<void>;
   launchDrone: () => Promise<void>;
   pauseDrone: () => Promise<void>;
-  returnDrone: () => void;
+  returnDrone: () => Promise<void>;
   selectEntity: (entity: SelectedEntity | null) => void;
   toggleOverlay: (key: keyof Overlays) => void;
   runPresetScenario: (step: 'normal' | 'partition' | 'droneRelay' | 'reconnect') => void;
 }
+
+let stepInFlight = false;
 
 export const useSimulationStore = create<SimulationStore>((set, get) => ({
   world: createInitialScenario(),
@@ -56,12 +61,12 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
   selectedEntity: null,
   overlays: {
     flood: true,
-    coverage: true,
     routes: true,
     civilians: true
   },
   isPythonBackendConnected: false,
 
+  // Try Python once on mount; retain the separate browser demo if no backend is reachable.
   init: async () => {
     try {
       const state = await fetchState();
@@ -72,19 +77,29 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     }
   },
 
+  // Start scheduling ticks without directly mutating the current world.
   startSimulation: () => set({ isRunning: true }),
+  // Stop scheduled ticks while retaining all mission state.
   pauseSimulation: () => set({ isRunning: false }),
+  // Toggle only the playback scheduler.
   togglePlayPause: () => set(state => ({ isRunning: !state.isRunning })),
 
+  // Prevent overlapping timer requests and pause if an authoritative live step fails.
   stepTick: async () => {
+    if (stepInFlight) return;
     const { isPythonBackendConnected } = get();
     if (isPythonBackendConnected) {
+      stepInFlight = true;
       try {
         const nextState = await stepSimulationApi();
         set({ world: nextState });
         return;
       } catch (err) {
-        console.warn('Python step failed, falling back to client logic:', err);
+        console.error('Python step failed; simulation paused:', err);
+        set({ isRunning: false });
+        return;
+      } finally {
+        stepInFlight = false;
       }
     }
     // Fallback deterministic stepping
@@ -93,6 +108,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     }));
   },
 
+  // Reset server state when connected and clear stale selections and playback.
   resetSimulation: async (scenario: string = 'small') => {
     const { isPythonBackendConnected } = get();
     if (isPythonBackendConnected) {
@@ -115,8 +131,10 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     });
   },
 
+  // Choose the existing 1x, 2x, or 4x playback multiplier.
   setSpeed: (speed: 1 | 2 | 4) => set({ speed }),
 
+  // Request a real connectivity change; view overlays never affect communication.
   toggleRadio: async () => {
     const { isPythonBackendConnected, world } = get();
     const nextRadio = !world.radioConnected;
@@ -164,104 +182,43 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     });
   },
 
+  // Resume the backend drone and playback; never silently switch to a fixed client patrol.
   launchDrone: async () => {
-    const { isPythonBackendConnected } = get();
-    if (isPythonBackendConnected) {
-      try {
-        const nextState = await controlDroneApi('launch');
-        set({ world: nextState, isRunning: true });
-        return;
-      } catch (err) {
-        console.warn('Python controlDrone failed:', err);
-      }
+    try {
+      const world = await controlDroneApi('launch');
+      set({ world, isRunning: true, isPythonBackendConnected: true });
+    } catch (err) {
+      console.error('Drone launch requires the Python AI backend:', err);
+      set({ isRunning: false });
     }
-
-    set(state => {
-      const tick = state.world.tick;
-      const timestamp = formatSimTimestamp(tick);
-      return {
-        isRunning: true,
-        world: {
-          ...state.world,
-          drone: {
-            ...state.world.drone,
-            enabled: true,
-            status: 'flying'
-          },
-          events: [
-            ...state.world.events,
-            {
-              id: `ev_drone_launch_${tick}`,
-              tick,
-              timestamp,
-              category: 'drone' as const,
-              severity: 'info' as const,
-              title: 'Courier Drone Dispatched',
-              description: 'AeroRelay CR-1 launched on cross-partition transit corridor.'
-            }
-          ]
-        }
-      };
-    });
   },
 
+  // Pause drone flight on the backend while preserving accepted team rescue orders.
   pauseDrone: async () => {
-    const { isPythonBackendConnected } = get();
-    if (isPythonBackendConnected) {
-      try {
-        const nextState = await controlDroneApi('pause');
-        set({ world: nextState });
-        return;
-      } catch (err) {
-        console.warn('Python pause drone failed:', err);
-      }
+    try {
+      const world = await controlDroneApi('pause');
+      set({ world });
+    } catch (err) {
+      console.error('Drone pause failed:', err);
+      set({ isRunning: false });
     }
-
-    set(state => ({
-      world: {
-        ...state.world,
-        drone: {
-          ...state.world.drone,
-          status: 'paused'
-        }
-      }
-    }));
   },
 
-  returnDrone: () => {
-    set(state => {
-      const tick = state.world.tick;
-      const timestamp = formatSimTimestamp(tick);
-      return {
-        world: {
-          ...state.world,
-          drone: {
-            ...state.world.drone,
-            destinationNeighbourhood:
-              state.world.drone.destinationNeighbourhood === 'neighbourhood_alpha'
-                ? 'neighbourhood_bravo'
-                : 'neighbourhood_alpha',
-            status: 'returning'
-          },
-          events: [
-            ...state.world.events,
-            {
-              id: `ev_drone_ret_${tick}`,
-              tick,
-              timestamp,
-              category: 'drone' as const,
-              severity: 'info' as const,
-              title: 'Drone Return Commanded',
-              description: 'CR-1 courier ordered to reverse trajectory towards base hub.'
-            }
-          ]
-        }
-      };
-    });
+  // Send the operator return command and let the backend validate the route.
+  returnDrone: async () => {
+    try {
+      const world = await controlDroneApi('return');
+      set({ world, isRunning: true, isPythonBackendConnected: true });
+    } catch (err) {
+      console.error('Drone return failed:', err);
+      set({ isRunning: false });
+    }
   },
 
+  // Change the inspected entity without influencing autonomous decisions.
   selectEntity: entity => set({ selectedEntity: entity }),
 
+  // Change only map presentation.
   toggleOverlay: key =>
     set(state => ({
       overlays: {
@@ -270,6 +227,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       }
     })),
 
+  // Translate scenario shortcuts into the same reset, radio, and launch actions.
   runPresetScenario: preset => {
     const { toggleRadio, launchDrone, resetSimulation } = get();
     if (preset === 'normal') {

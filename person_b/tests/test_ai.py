@@ -1,3 +1,4 @@
+# Regress bounded advice, stale-reply rejection, caches, and sanitized provider handling without live HTTP.
 import json
 import tempfile
 import unittest

@@ -1,3 +1,7 @@
+/**
+ * Standalone browser fallback helpers. The live Python controller owns drone-directed rescue
+ * assignment and offline wandering.
+ */
 import {
   AIRecommendation,
   CivilianGroup,
@@ -11,7 +15,7 @@ import {
 } from '../types/simulation';
 
 /**
- * Compute shortest path avoiding deep water when possible
+ * Compute a dry, cardinal route. No route means wait; never cross water.
  */
 export function findPath(
   start: GridPosition,
@@ -59,17 +63,12 @@ export function findPath(
       const ny = pos.y + d.dy;
       const key = `${nx},${ny}`;
 
-      if (nx >= 0 && nx < 20 && ny >= 0 && ny < 20 && !visited.has(key)) {
+      if (nx >= 0 && nx < cells[0].length && ny >= 0 && ny < cells.length && !visited.has(key)) {
         visited.add(key);
         const cell = cells[ny][nx];
 
-        // Deep impassable water without road
-        if (cell.isFlooded && cell.waterDepth >= 3 && !cell.isSubmergedRoad) {
-          // Unless goal is right there, avoid
-          if (nx !== goal.x || ny !== goal.y) {
-            continue;
-          }
-        }
+        // All flooded cells are impassable, including roads and the goal.
+        if (cell.isFlooded) continue;
 
         queue.push({
           pos: { x: nx, y: ny },
@@ -79,11 +78,7 @@ export function findPath(
     }
   }
 
-  // Fallback simple line step if path not found
-  const dx = Math.sign(goal.x - start.x);
-  const dy = Math.sign(goal.y - start.y);
-  if (dx !== 0) return [{ x: start.x + dx, y: start.y }];
-  if (dy !== 0) return [{ x: start.x, y: start.y + dy }];
+  // No dry route: remain in place instead of walking through the obstacle.
   return [];
 }
 

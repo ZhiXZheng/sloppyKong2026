@@ -8,16 +8,20 @@ ACTIVE = {ClaimStatus.PROVISIONAL, ClaimStatus.CONFIRMED}
 TERMINAL = {ClaimStatus.RELEASED, ClaimStatus.REJECTED, ClaimStatus.COMPLETED}
 
 
+# Compare authoritative source revision before tick and stable provenance tie-breakers.
 def observation_order(observation):
     return (observation.entity_revision, observation.observed_tick,
             observation.observer_id, observation.observation_id.hex)
 
 
+# Apply deterministic ordering when several local claims concern the same task.
 def claim_order(claim):
     return claim.claimed_at_tick, claim.team_id, claim.claim_id.hex
 
 
+# Hold one team's deduplicated observations, claims, and resolution tombstones.
 class BeliefStore:
+    # Start an isolated versioned store with independent message and observation deduplication.
     def __init__(self, team_id):
         self.team_id = team_id
         self.version = 1
@@ -27,12 +31,15 @@ class BeliefStore:
         self._seen_observations = set()
         self._seen_messages = set()
 
+    # Accept each envelope identity once even if a courier delivers it repeatedly.
     def accept_message(self, message_id):
         if message_id in self._seen_messages:
             return False
         self._seen_messages.add(message_id)
         return True
 
+    # Reject stale provenance and copy accepted observations so callers cannot mutate stored
+    # facts.
     def observe(self, observation):
         if observation.observation_id in self._seen_observations:
             return False
@@ -45,14 +52,17 @@ class BeliefStore:
         self.version += 1
         return True
 
+    # Return a defensive copy of the latest fact for a particular entity.
     def get(self, entity_type, entity_id):
         item = self._observations.get((entity_type, entity_id))
         return item.model_copy(deep=True) if item else None
 
+    # Return stable, copied observations, optionally restricted to one entity type.
     def observations(self, entity_type=None):
         return [o.model_copy(deep=True) for key, o in sorted(self._observations.items())
                 if entity_type is None or key[0] == entity_type]
 
+    # Respect claim versions and terminal resolution tombstones when delayed claims arrive.
     def merge_claim(self, claim):
         old = self._claims.get(claim.claim_id)
         if old and (claim.claim_version <= old.claim_version or old.status in TERMINAL):
@@ -69,6 +79,8 @@ class BeliefStore:
         self.version += 1
         return True
 
+    # Apply only newer arbitration and reject losing active claims without resurrecting terminal
+    # work.
     def resolve(self, resolution):
         old = self._resolutions.get(resolution.civilian_group_id)
         if old and (resolution.resolution_version <= old.resolution_version or
@@ -90,6 +102,7 @@ class BeliefStore:
         self.version += 1
         return True
 
+    # Expose copied claims in deterministic arbitration order.
     def claims(self):
         return [c.model_copy(deep=True) for c in sorted(self._claims.values(), key=claim_order)]
 
@@ -100,10 +113,12 @@ class BeliefStore:
                 self._claims[claim_id] = claim.model_copy(update={"status": ClaimStatus.RELEASED})
                 self.version += 1
 
+    # Find this team's current reservation for a group, if one exists.
     def own_active_claim(self, group_id):
         return next((c for c in self.claims() if c.team_id == self.team_id
                      and c.civilian_group_id == group_id and c.status in ACTIVE), None)
 
+    # Prevent local planning from duplicating another known winner or completed rescue.
     def claimed_by_other(self, group_id):
         resolution = self._resolutions.get(group_id)
         if resolution:
@@ -118,10 +133,12 @@ class BeliefStore:
                        c.civilian_group_id == group_id and c.status == ClaimStatus.COMPLETED
                        for c in self._claims.values())
 
+    # Package copied local knowledge and its version for AI or protocol consumers.
     def snapshot(self, tick):
         return TeamBeliefSnapshot(team_id=self.team_id, belief_version=self.version,
                                   world_tick=tick, observations=self.observations(), claims=self.claims())
 
+    # Preserve observation provenance while translating local facts into belief-update messages.
     def updates(self, tick, timestamp):
         return [BeliefUpdate(team_id=self.team_id, entity=o.entity, position=o.position,
                 believed_status=o.observed_status, confidence=o.confidence,

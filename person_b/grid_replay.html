@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>FloodNet | Rescue grid replay</title>
+<!-- Standalone replay styling; this template is separate from the live React dashboard. -->
 <style>
 :root{color-scheme:dark;--bg:#0b111c;--panel:#121d2c;--line:#2b3c51;--ink:#ecf2fa;--muted:#a8b9cc;--a:#65d9ef;--b:#ffbd73;--drone:#c2a4ff;--civilian:#f7de80;--safe:#8de0b7}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,Segoe UI,sans-serif}
@@ -41,6 +42,7 @@ button,select{font:inherit;color:var(--ink);background:#1a2a3e;border:1px solid 
  <section class="panel events-panel"><h2 id="eventHeading">Ready to start</h2><ul class="events" id="events"><li>Press Play or Step to follow the rescue.</li></ul></section>
 </div>
 </main>
+<!-- Python embeds recorded outcomes here; replay data never controls the live simulation. -->
 <script id="replay-data" type="application/json">__REPLAY_DATA__</script>
 <script>
 (() => {
@@ -54,6 +56,7 @@ button,select{font:inherit;color:var(--ink);background:#1a2a3e;border:1px solid 
  const frames=()=>data.runs[run].frames;
  const xy=p=>({x:pad+(p.x+.5)*cell,y:pad+(p.y+.5)*cell});
  const blend=(a,b,t)=>({x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t});
+ // Build only the chosen viewing extent; changing extent does not alter recorded coordinates.
  function buildGrid(){
   const full=$('extent').value==='full';columns=full?20:10;rows=full?20:7;
   $('grid').classList.toggle('full',full);
@@ -66,11 +69,13 @@ button,select{font:inherit;color:var(--ink);background:#1a2a3e;border:1px solid 
   for(let y=0;y<rows;y++)markup+=`<text class="axis" text-anchor="middle" x="12" y="${pad+(y+.5)*cell+4}">${y}</text>`;
   $('background').innerHTML=markup;
  }
+ // Escape labels before inserting reusable entity-marker markup.
  function marker(x,y,shape,fill,letter,label,extra=''){
   return `<g transform="translate(${x},${y})"><title>${esc(label)}</title>${shape(fill)}<text class="mark-letter" x="0" y="0">${esc(letter)}</text>${extra}</g>`;
  }
  const box=fill=>`<rect x="-12" y="-12" width="24" height="24" rx="6" fill="${fill}" stroke="#0b111c" stroke-width="2"/>`;
  const diamond=fill=>`<path d="M 0 -13 L 13 0 L 0 13 L -13 0 Z" fill="${fill}" stroke="#0b111c" stroke-width="2"/>`;
+ // Interpolate recorded positions for display and update counts from actual frame outcomes.
  function draw(){
   const all=frames(),index=Math.min(Math.floor(cursor),all.length-1),f=all[index],next=all[Math.min(index+1,all.length-1)];
   const t=reduced?0:cursor-index,w=f.world,n=next.world;
@@ -106,13 +111,16 @@ button,select{font:inherit;color:var(--ink);background:#1a2a3e;border:1px solid 
   }
   $('back').disabled=cursor<=0;$('step').disabled=cursor>=all.length-1;
  }
+ // Change replay playback state without advancing the underlying recorded simulation.
  function setPlaying(value){playing=value;$('play').textContent=value?'Pause':'Play';lastTime=null;}
+ // Clamp manual navigation to recorded frames and refresh the selected snapshot.
  function seek(value){setPlaying(false);cursor=Math.max(0,Math.min(value,frames().length-1));lastIndex=-1;draw();}
  $('play').addEventListener('click',()=>{if(cursor>=frames().length-1)cursor=0;setPlaying(!playing);lastIndex=-1;draw();});
  $('back').addEventListener('click',()=>seek(Math.ceil(cursor)-1));$('step').addEventListener('click',()=>seek(Math.floor(cursor)+1));$('restart').addEventListener('click',()=>seek(0));
  $('timeline').addEventListener('input',e=>seek(Number(e.target.value)));
  $('run').addEventListener('change',e=>{run=Number(e.target.value);$('timeline').max=frames().length-1;seek(cursor);});
  $('extent').addEventListener('change',()=>{buildGrid();draw();});
+ // Advance the replay cursor with bounded frame deltas and respect reduced-motion preferences.
  function animate(time){if(playing){if(lastTime!==null)cursor=Math.min(frames().length-1,cursor+Math.min((time-lastTime)/1000,.15)*Number($('speed').value));lastTime=time;draw();if(cursor>=frames().length-1)setPlaying(false);}requestAnimationFrame(animate);}
  $('seed').textContent=`Seed ${data.seed} / ${frames().length-1} ticks`;$('timeline').max=frames().length-1;$('lastTick').textContent=`${frames().length-1} steps`;
  $('comparison').textContent=data.runs.map(r=>`Drone ${r.drone_on?'ON':'OFF'}: ${r.rescued}/${r.total} final`).join('   |   ');

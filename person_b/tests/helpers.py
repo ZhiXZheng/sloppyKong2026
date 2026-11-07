@@ -1,3 +1,4 @@
+# Deterministic protocol fixtures and a fake model adapter; these helpers never make paid API calls.
 from schema import EntityReference, EntityType, Observation, RescueTeamState
 from person_b.runtime import Runtime
 
