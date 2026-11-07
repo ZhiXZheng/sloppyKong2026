@@ -3,7 +3,7 @@ import pytest
 from floodnet.sim.pathing import gp, tup
 from floodnet.sim.runner import run
 from floodnet.sim.scenario import compute_flood_ticks, default_scenario, load_scenario
-from floodnet.sim.world import LOST, World
+from floodnet.sim.world import World
 from schema import (
     ActionProposal,
     ActionStatus,
@@ -125,11 +125,15 @@ def test_waiting_group_is_lost_when_flooded_but_carried_group_is_safe(world):
     world.step([pickup("team-w1", "group-5")])
     while world.tick < deadline:
         world.step([])
-    assert "group-2" in world.lost_group_ids and "group-5" not in world.lost_group_ids
+    assert world.civilians["group-2"].status == CivilianStatus.LOST
+    assert world.civilians["group-5"].status == CivilianStatus.PICKED_UP
     place(world, "team-w2", (6, 7))
     obs = [o for o in world.observe("team-w2") if o.entity.entity_id == "group-2"]
-    assert obs[0].observed_status == LOST
-    assert all(c.group_id != "group-2" for c in world.snapshot().civilian_groups)
+    assert obs[0].observed_status == "lost"
+    snap = {c.group_id: c.status for c in world.snapshot().civilian_groups}
+    assert snap["group-2"] == CivilianStatus.LOST
+    place(world, "team-w2", (5, 8))  # adjacent: pickup must still be refused
+    assert world.step([pickup("team-w2", "group-2")]).results[0].status == ActionStatus.REJECTED
 
 
 def test_observations_are_local_and_schema_valid(world):

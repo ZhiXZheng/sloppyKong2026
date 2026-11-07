@@ -37,9 +37,9 @@ from schema import (
     WorldSnapshot,
 )
 
-LOST = "lost"  # observed_status for groups taken by the flood (schema.CivilianStatus has no LOST)
 FLOODED = "flooded"
-SAFE = (CivilianStatus.DELIVERED, CivilianStatus.RESCUED)
+TERMINAL = (CivilianStatus.DELIVERED, CivilianStatus.LOST)
+FLOOD_ACTOR = "simulation"  # changed_by_team_id when the flood (not a team) changes a group
 
 
 @dataclass
@@ -72,7 +72,6 @@ class World:
         }
         self.revisions: dict[str, int] = {gid: 0 for gid in self.civilians}
         self.shelter_revision = 0
-        self.lost_group_ids: set[str] = set()
         self.log: list[StepOutcome] = []
         for c in self.civilians.values():
             if tup(c.position) in self.flooded:
@@ -116,9 +115,7 @@ class World:
     def is_done(self) -> bool:
         if self.tick >= self.cfg.max_ticks:
             return True
-        return all(
-            c.status in SAFE or gid in self.lost_group_ids for gid, c in self.civilians.items()
-        )
+        return all(c.status in TERMINAL for c in self.civilians.values())
 
     # ---------- sensing ----------
     def _observation(self, observer: str, etype: EntityType, eid: str, pos: Pos,
@@ -149,9 +146,8 @@ class World:
         out: list[Observation] = []
         for gid, c in sorted(self.civilians.items()):
             if near(tup(c.position)):
-                status = LOST if gid in self.lost_group_ids else c.status.value
                 out.append(self._observation(
-                    agent_id, EntityType.CIVILIAN_GROUP, gid, tup(c.position), status,
+                    agent_id, EntityType.CIVILIAN_GROUP, gid, tup(c.position), c.status.value,
                     self.revisions[gid],
                     {"size": c.size, "picked_up_by_team_id": c.picked_up_by_team_id},
                 ))
@@ -284,9 +280,7 @@ class World:
         group = self.civilians.get(p.target_entity_id)
         if group is None:
             return self._reject(p, f"unknown group {p.target_entity_id}")
-        if group.group_id in self.lost_group_ids:
-            return self._reject(p, f"{group.group_id} was lost to the flood")
-        if group.status in (CivilianStatus.PICKED_UP, *SAFE):
+        if group.status in (CivilianStatus.PICKED_UP, *TERMINAL):
             return self._reject(p, f"{group.group_id} is already {group.status.value}")
         if manhattan(tup(team.position), tup(group.position)) > 1:
             return self._reject(p, f"{group.group_id} not adjacent")
@@ -330,12 +324,9 @@ class World:
             if (
                 c.status in (CivilianStatus.AVAILABLE, CivilianStatus.REPORTED,
                              CivilianStatus.CLAIMED, CivilianStatus.UNKNOWN)
-                and gid not in self.lost_group_ids
                 and tup(c.position) in self.flooded
             ):
-                self.lost_group_ids.add(gid)
-                self.revisions[gid] += 1
-                c.last_updated_at = self.now()
+                self._set_group_status(outcome, c, CivilianStatus.LOST, FLOOD_ACTOR)
                 outcome.lost_group_ids.append(gid)
         for d in self.drones.values():
             d.world_tick = self.tick
@@ -343,8 +334,8 @@ class World:
     # ---------- outputs ----------
     def score(self) -> dict[str, int]:
         cs = self.civilians
-        rescued = [c for c in cs.values() if c.status in SAFE]
-        lost = [cs[g] for g in self.lost_group_ids]
+        rescued = [c for c in cs.values() if c.status == CivilianStatus.DELIVERED]
+        lost = [c for c in cs.values() if c.status == CivilianStatus.LOST]
         return {
             "groups_total": len(cs),
             "groups_rescued": len(rescued),
@@ -359,12 +350,11 @@ class World:
                            flood_cells=[gp(p) for p in sorted(self.flooded)])
 
     def snapshot(self) -> WorldSnapshot:
-        """Ground truth for the dashboard. Lost groups are listed in `lost_group_ids`."""
+        """Ground truth for the dashboard."""
         return WorldSnapshot(
             world_tick=self.tick,
             created_at=self.now(),
-            civilian_groups=[c.model_copy(deep=True) for g, c in sorted(self.civilians.items())
-                             if g not in self.lost_group_ids],
+            civilian_groups=[c.model_copy(deep=True) for _, c in sorted(self.civilians.items())],
             shelters=[self.shelter.model_copy(deep=True)],
             rescue_teams=[t.model_copy(deep=True) for _, t in sorted(self.teams.items())],
             flood_cells=[gp(p) for p in sorted(self.flooded)],

@@ -42,7 +42,7 @@ def render(world: World) -> str:
     grid[sy][sx] = "S"
     for gid, c in world.civilians.items():
         x, y = tup(c.position)
-        if gid in world.lost_group_ids:
+        if c.status == CivilianStatus.LOST:
             grid[y][x] = "x"
         elif c.status == CivilianStatus.AVAILABLE:
             grid[y][x] = "c"
@@ -67,8 +67,6 @@ def run(scenario: str = "default", ticks: int | None = None, delay: float = 0.0,
         if show:
             for u in out.status_updates:
                 print(f"[t{u.world_tick}] {u.civilian_group_id} {u.status.value} by {u.changed_by_team_id}")
-            for gid in out.lost_group_ids:
-                print(f"[t{world.tick}] {gid} lost to the flood")
             for r in out.results:
                 if r.status == ActionStatus.REJECTED:
                     print(f"[t{r.applied_at_tick}] rejected {r.team_id}: {r.message}")
